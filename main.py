@@ -183,12 +183,27 @@ def fetch_breakout_candles(symbol):
         c = candles[current_index]
         candle_time = datetime.fromtimestamp(c[0]/1000, tz=timezone.utc)
         
+        # Get previous candle for pump percentage calculation
+        prev_close = float(candles[current_index - 1][4])
+        
         open_p = float(c[1])
         high = float(c[2])
         low = float(c[3])
         close = float(c[4])
         volume = float(c[5])
         vol_usdt = open_p * volume
+
+        # Calculate pump percentage (current close vs previous close)
+        pct = ((close - prev_close) / prev_close) * 100
+
+        # Calculate volume multiplier (20-period MA)
+        ma_start = max(0, current_index - 19)
+        ma_vol = [
+            float(candles[j][1]) * float(candles[j][5])
+            for j in range(ma_start, current_index + 1)
+        ]
+        ma = sum(ma_vol) / len(ma_vol)
+        vm = vol_usdt / ma if ma > 0 else 1.0
 
         # Calculate RSI
         all_closes = [float(candles[j][4]) for j in range(0, current_index + 1)]
@@ -210,7 +225,7 @@ def fetch_breakout_candles(symbol):
         # Only return if within breakout range
         if BREAKOUT_MIN <= breakout_distance <= BREAKOUT_MAX:
             hour = candle_time.strftime("%Y-%m-%d %H:00")
-            return (symbol, close, vol_usdt, rsi, direction, breakout_distance, hour)
+            return (symbol, pct, close, vol_usdt, vm, rsi, direction, breakout_distance, hour)
         
         return None
     except Exception as e:
@@ -235,23 +250,22 @@ def format_breakout_report(fresh, duration):
     # Group by hour
     grouped = defaultdict(list)
     for p in fresh:
-        grouped[p[6]].append(p)
+        grouped[p[8]].append(p)
 
     report = f"🚀 <b>BREAKOUT ALERTS</b> 🚀\n"
     report += f"⏱ Scan: {duration:.2f}s\n\n"
     
     for h in sorted(grouped):
-        items = sorted(grouped[h], key=lambda x: x[5])  # Sort by breakout distance (closest first)
+        items = sorted(grouped[h], key=lambda x: x[7])  # Sort by breakout distance (closest first)
         
         report += f"  ⏰ {h} UTC\n"
         
-        for symbol, close, vol_usdt, rsi, direction, breakout_distance, hour in items:
+        for symbol, pct, close, vol_usdt, vm, rsi, direction, breakout_distance, hour in items:
             sym = symbol.replace("USDT","")
             rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
-            vol_str = format_volume(vol_usdt)
             
-            # Format: Symbol Price RSI Volume Distance
-            line = f"{sym:6s} ${close:8.4f} RSI:{rsi_str:>4s} Vol:{vol_str:>4s}M 🔴-{breakout_distance:.1f}%"
+            # Format line exactly like pump scanner
+            line = f"{sym:6s} {pct:5.2f} {rsi_str:>4s} {vm:4.1f} {format_volume(vol_usdt):4s} 🔴-{breakout_distance:.1f}%"
             
             report += f"🚀 <code>{line}</code>\n"
         
