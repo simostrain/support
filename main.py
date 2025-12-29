@@ -10,6 +10,8 @@ BINANCE_API = "https://api.binance.com"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 RSI_PERIOD = 14
+SUPPORT_MIN = 0.0  # Minimum distance from support (0%)
+SUPPORT_MAX = 3.0  # Maximum distance from support (3%)
 reported = set()  # avoid duplicate (symbol, hour)
 
 CUSTOM_TICKERS = [
@@ -166,7 +168,7 @@ def get_usdt_pairs():
         print("Exchange info error:", e)
         return []
 
-def fetch_breakout_candles(symbol):
+def fetch_support_touch(symbol):
     try:
         url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
         candles = session.get(url, timeout=60).json()
@@ -213,47 +215,39 @@ def fetch_breakout_candles(symbol):
         if direction is None or upper_band is None or lower_band is None:
             return None
 
-        # Calculate Supertrend for PREVIOUS candle
-        if current_index > 0:
-            prev_supertrend_value, prev_direction, prev_upper_band, prev_lower_band = calculate_supertrend(candles, current_index - 1)
+        # Only interested in UPTREND coins
+        if direction == -1:  # Uptrend
+            # Calculate distance from close to support line (green line / lower_band)
+            support_line = supertrend_value  # This is the lower_band when in uptrend
+            distance_from_support = ((close - support_line) / support_line) * 100
             
-            if prev_direction is None:
-                return None
-            
-            # Check if trend JUST CHANGED from downtrend to uptrend
-            if prev_direction == 1 and direction == -1:  # Was downtrend, now uptrend!
+            # Check if within range (close to support)
+            if SUPPORT_MIN <= distance_from_support <= SUPPORT_MAX:
                 hour = candle_time.strftime("%Y-%m-%d %H:00")
                 
-                # OLD RED LINE (last downtrend line) = prev_supertrend_value (which is prev_upper_band)
-                old_red_line = prev_supertrend_value
-                # Distance from close to old red line (how much we broke above it)
-                red_distance = ((close - old_red_line) / old_red_line) * 100
-                
-                # NEW GREEN LINE (first uptrend line) = supertrend_value (which is lower_band)
-                new_green_line = supertrend_value
-                # Distance from close to new green line (how far above we are now)
-                green_distance = ((close - new_green_line) / new_green_line) * 100
+                # Calculate distance to resistance (upper band - where downtrend would start)
+                distance_to_resistance = ((upper_band - close) / close) * 100
                 
                 return (symbol, pct, close, vol_usdt, vm, rsi, direction, 
-                       old_red_line, red_distance, new_green_line, green_distance, hour)
+                       support_line, distance_from_support, upper_band, distance_to_resistance, hour)
         
         return None
     except Exception as e:
         print(f"{symbol} error:", e)
         return None
 
-def check_breakouts(symbols):
-    breakouts = []
+def check_support_touches(symbols):
+    touches = []
 
     with ThreadPoolExecutor(max_workers=60) as ex:
-        for f in as_completed([ex.submit(fetch_breakout_candles, s) for s in symbols]):
+        for f in as_completed([ex.submit(fetch_support_touch, s) for s in symbols]):
             result = f.result()
             if result:
-                breakouts.append(result)
+                touches.append(result)
 
-    return breakouts
+    return touches
 
-def format_breakout_report(fresh, duration):
+def format_support_report(fresh, duration):
     if not fresh:
         return None
     
@@ -262,33 +256,43 @@ def format_breakout_report(fresh, duration):
     for p in fresh:
         grouped[p[11]].append(p)
 
-    report = f"🚀 <b>TREND BREAKOUT ALERTS</b> 🚀\n"
+    report = f"📍 <b>SUPPORT TOUCH ALERTS</b> 📍\n"
     report += f"⏱ Scan: {duration:.2f}s\n\n"
     
     for h in sorted(grouped):
-        items = sorted(grouped[h], key=lambda x: x[8], reverse=True)  # Sort by red_distance (biggest break first)
+        # Sort by distance from support (closest first = best entry)
+        items = sorted(grouped[h], key=lambda x: x[8])
         
         report += f"  ⏰ {h} UTC\n"
         
-        for symbol, pct, close, vol_usdt, vm, rsi, direction, old_red_line, red_distance, new_green_line, green_distance, hour in items:
+        for symbol, pct, close, vol_usdt, vm, rsi, direction, support_line, distance_from_support, resistance_line, distance_to_resistance, hour in items:
             sym = symbol.replace("USDT","")
             rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
             
-            # Line 1: Basic info like pump scanner
+            # Line 1: Basic info
             line1 = f"{sym:6s} {pct:5.2f} {rsi_str:>4s} {vm:4.1f} {format_volume(vol_usdt):4s}"
             
-            # Line 2: Old red line and distance
-            line2 = f"       🔴Old: ${old_red_line:.5f} (+{red_distance:.2f}%)"
+            # Line 2: Support line and distance (how close to support)
+            line2 = f"       🟢Sup: ${support_line:.5f} (+{distance_from_support:.2f}%)"
             
-            # Line 3: New green line and distance  
-            line3 = f"       🟢New: ${new_green_line:.5f} (+{green_distance:.2f}%)"
+            # Line 3: Resistance line and potential gain
+            line3 = f"       🔴Res: ${resistance_line:.5f} (🎯+{distance_to_resistance:.2f}%)"
             
-            report += f"✅ <code>{line1}</code>\n"
+            # Choose emoji based on how close to support
+            if distance_from_support <= 1.0:
+                emoji = "🎯"  # Very close - best entry!
+            elif distance_from_support <= 2.0:
+                emoji = "✅"  # Good entry
+            else:
+                emoji = "🟢"  # Okay entry
+            
+            report += f"{emoji} <code>{line1}</code>\n"
             report += f"   <code>{line2}</code>\n"
             report += f"   <code>{line3}</code>\n\n"
         
-    report += "💡 🔴Old = Last downtrend line (broke above it!)\n"
-    report += "💡 🟢New = New uptrend line (support now)\n"
+    report += "💡 🟢Sup = Support line (buy zone)\n"
+    report += "💡 🔴Res = Resistance line (profit target)\n"
+    report += "💡 Closer to support = Better entry!\n"
     
     return report
 
@@ -300,24 +304,24 @@ def main():
 
     while True:
         start = time.time()
-        breakouts = check_breakouts(symbols)
+        touches = check_support_touches(symbols)
         duration = time.time() - start
 
         # Filter out already reported
         fresh = []
-        for b in breakouts:
-            key = (b[0], b[6])  # symbol, hour
+        for t in touches:
+            key = (t[0], t[11])  # symbol, hour
             if key not in reported:
                 reported.add(key)
-                fresh.append(b)
+                fresh.append(t)
 
         if fresh:
-            msg = format_breakout_report(fresh, duration)
+            msg = format_support_report(fresh, duration)
             if msg:
                 print(msg)
                 send_telegram(msg[:4096])
         else:
-            print(f"No breakout opportunities found. Scanned {len(symbols)} pairs in {duration:.2f}s")
+            print(f"No support touch opportunities found. Scanned {len(symbols)} pairs in {duration:.2f}s")
 
         # Wait until next hour
         server = get_binance_server_time()
