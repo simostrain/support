@@ -260,6 +260,8 @@ def check_breakouts(symbols):
     now_utc = datetime.now(timezone.utc)
     start_time = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
     breakouts = []
+    
+    print(f"Checking from {start_time.strftime('%Y-%m-%d %H:%M')} to {now_utc.strftime('%Y-%m-%d %H:%M')} UTC")
 
     with ThreadPoolExecutor(max_workers=60) as ex:
         futures = [ex.submit(fetch_breakout_candles, s, now_utc, start_time) for s in symbols]
@@ -267,6 +269,8 @@ def check_breakouts(symbols):
             results = f.result()
             if results:
                 breakouts.extend(results)
+                for r in results:
+                    print(f"  Found: {r[0]} at {r[11]} - broke from downtrend to uptrend")
 
     return breakouts
 
@@ -309,10 +313,17 @@ def main():
     if not symbols:
         return
 
+    print("Starting breakout scanner...")
+    print(f"Monitoring {len(symbols)} pairs for trend reversals (downtrend → uptrend)")
+    print("-" * 80)
+
     while True:
         start = time.time()
         breakouts = check_breakouts(symbols)
         duration = time.time() - start
+
+        print(f"\nScan completed in {duration:.2f}s")
+        print(f"Total breakouts found: {len(breakouts)}")
 
         fresh = []
         for b in breakouts:
@@ -320,19 +331,28 @@ def main():
             if key not in reported:
                 reported.add(key)
                 fresh.append(b)
+            else:
+                print(f"  Skipping {b[0]} - already reported for {b[11]}")
+
+        print(f"New breakouts (not yet reported): {len(fresh)}")
 
         if fresh:
             msg = format_breakout_report(fresh, duration)
             if msg:
+                print("\n" + "="*80)
+                print("SENDING TO TELEGRAM:")
+                print("="*80)
                 print(msg)
+                print("="*80)
                 send_telegram(msg[:4096])
         else:
-            print(f"No breakouts found. Scanned {len(symbols)} pairs in {duration:.2f}s")
+            print(f"No new breakouts found.")
 
         server = get_binance_server_time()
         next_hour = (server // 3600 + 1) * 3600
         sleep_time = max(0, next_hour - server + 1)
-        print(f"Sleeping for {sleep_time:.0f}s until next hour...")
+        print(f"\nSleeping for {sleep_time:.0f}s until next hour...")
+        print("-" * 80)
         time.sleep(sleep_time)
 
 if __name__ == "__main__":
