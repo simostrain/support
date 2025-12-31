@@ -18,8 +18,8 @@ TELEGRAM_CHAT_ID_2 = os.getenv("TELEGRAM_CHAT_ID_2")
 
 PUMP_THRESHOLD = 3  # percent
 RSI_PERIOD = 14
-reported_pumps = set()  # avoid duplicate alerts
-reported_breakouts = set()  # avoid duplicate alerts
+reported_pumps = set()
+reported_breakouts = set()
 
 CUSTOM_TICKERS = [
     "At","A2Z","ACE","ACH","ACT","ADA","ADX","AGLD","AIXBT","Algo","ALICE","ALPINE","ALT","AMP","ANKR","APE",
@@ -42,7 +42,7 @@ CUSTOM_TICKERS = [
 
 # ==== Session ====
 session = requests.Session()
-adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=2)
+adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=2)
 session.mount("https://", adapter)
 
 # ==== Telegram ====
@@ -59,13 +59,9 @@ def send_telegram(msg, bot_token, chat_id, alert_type, max_retries=3):
             }, timeout=10)
             
             if response.status_code == 200:
-                print(f"✓ {alert_type} alert sent to Telegram")
+                print(f"✓ {alert_type} alert sent")
                 return True
-            else:
-                print(f"⚠ Telegram API returned status {response.status_code} for {alert_type}")
-                
         except Exception as e:
-            print(f"✗ Telegram error for {alert_type} (attempt {attempt+1}/{max_retries}): {str(e)[:100]}")
             if attempt < max_retries - 1:
                 time.sleep(2)
     
@@ -125,9 +121,9 @@ def calculate_atr(candles, period=10):
     return atr
 
 def calculate_supertrend(candles, atr_period=10, multiplier=3.0):
-    """Calculate supertrend for all candles, return last state"""
+    """Calculate supertrend, return last state and previous state"""
     if len(candles) < atr_period + 1:
-        return None, None, None, None, None, None
+        return None, None
     
     up_list = []
     dn_list = []
@@ -139,7 +135,6 @@ def calculate_supertrend(candles, atr_period=10, multiplier=3.0):
         close = float(candles[idx][4])
         src = (high + low) / 2
         
-        # Calculate ATR up to this point
         atr = calculate_atr(candles[:idx+1], atr_period)
         
         up = src - (multiplier * atr)
@@ -173,15 +168,13 @@ def calculate_supertrend(candles, atr_period=10, multiplier=3.0):
         
         trend_list.append(trend)
     
-    # Return last and previous values
     last_trend = trend_list[-1]
     prev_trend = trend_list[-2] if len(trend_list) > 1 else last_trend
     last_up = up_list[-1]
     last_dn = dn_list[-1]
-    prev_up = up_list[-2] if len(up_list) > 1 else last_up
     prev_dn = dn_list[-2] if len(dn_list) > 1 else last_dn
     
-    return last_trend, prev_trend, last_up, last_dn, prev_up, prev_dn
+    return (last_trend, prev_trend, last_up, last_dn, prev_dn)
 
 # ==== Binance ====
 def get_usdt_pairs():
@@ -197,26 +190,24 @@ def get_usdt_pairs():
         print(f"✗ Exchange info error: {e}")
         return []
 
-# ==== OPTIMIZED SCAN - LAST CANDLE ONLY ====
-def scan_last_candle(symbol):
+# ==== STAGE 1: QUICK DETECTION (100 candles) ====
+def quick_scan(symbol):
     """
-    Optimized scan focusing ONLY on the last closed candle.
-    Returns: (pump_result, breakout_result) or (None, None)
+    Stage 1: Quick scan with 100 candles to detect pump or breakout.
+    Returns: ('pump', basic_data) or ('breakout', basic_data) or (None, None)
     """
     try:
-        # Fetch enough candles for indicators (50 should be plenty)
-        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
+        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=70"
         candles = session.get(url, timeout=5).json()
         
         if not candles or isinstance(candles, dict) or len(candles) < 20:
             return None, None
         
-        # Get last closed candle (second to last, as last one may be incomplete)
+        # Get last closed candle
         last_idx = len(candles) - 2
         last_candle = candles[last_idx]
         prev_candle = candles[last_idx - 1]
         
-        # Basic data
         candle_time = datetime.fromtimestamp(last_candle[0]/1000, tz=timezone.utc)
         hour = candle_time.strftime("%Y-%m-%d %H:00")
         
@@ -227,88 +218,203 @@ def scan_last_candle(symbol):
         vol_usdt = open_p * volume
         pct = ((close - prev_close) / prev_close) * 100
         
-        # Calculate volume multiplier (20-candle MA)
+        # Calculate basic metrics (we have enough data with 100 candles)
+        # Volume multiplier (20-candle MA)
         ma_start = max(0, last_idx - 19)
         ma_vol = [float(candles[j][1]) * float(candles[j][5]) for j in range(ma_start, last_idx + 1)]
         ma = sum(ma_vol) / len(ma_vol)
         vm = vol_usdt / ma if ma > 0 else 1.0
         
-        # Calculate RSI
+        # RSI (we have 100 candles, enough for RSI-14)
         all_closes = [float(candles[j][4]) for j in range(0, last_idx + 1)]
         rsi = calculate_rsi(all_closes, RSI_PERIOD)
         
-        # Calculate supertrend
-        last_trend, prev_trend, last_up, last_dn, prev_up, prev_dn = calculate_supertrend(candles[:last_idx+1])
+        # Check for PUMP
+        is_pump = pct >= PUMP_THRESHOLD
         
-        pump_result = None
-        breakout_result = None
+        # Check for BREAKOUT (need supertrend)
+        is_breakout = False
+        old_red_line = None
+        red_distance = None
+        new_green_line = None
+        green_distance = None
         
-        # === CHECK FOR PUMP ===
-        if pct >= PUMP_THRESHOLD:
-            # Calculate candles since last pump
-            candles_since_last = 250  # default
-            for i in range(last_idx - 1, max(0, last_idx - 250), -1):
-                prev_pct = ((float(candles[i][4]) - float(candles[i-1][4])) / float(candles[i-1][4])) * 100
-                if prev_pct >= PUMP_THRESHOLD:
-                    candles_since_last = last_idx - i
-                    break
-            
-            pump_result = (symbol, pct, close, vol_usdt, vm, rsi, candles_since_last, hour)
-        
-        # === CHECK FOR BREAKOUT ===
-        if last_trend is not None and prev_trend is not None:
-            if prev_trend == -1 and last_trend == 1:  # Trend reversal from down to up
-                # Calculate candles since last breakout
-                candles_since_last = 250  # default
-                
-                # Look back to find previous breakout
-                for look_back in range(1, min(250, last_idx)):
-                    check_idx = last_idx - look_back
-                    if check_idx < 15:  # Need enough data for supertrend
-                        break
-                    
-                    check_trend, check_prev_trend, _, _, _, _ = calculate_supertrend(candles[:check_idx+1])
-                    if check_trend is not None and check_prev_trend is not None:
-                        if check_prev_trend == -1 and check_trend == 1:
-                            candles_since_last = look_back
-                            break
-                
+        st_result = calculate_supertrend(candles[:last_idx+1])
+        if st_result:
+            last_trend, prev_trend, last_up, last_dn, prev_dn = st_result
+            if prev_trend == -1 and last_trend == 1:  # Trend reversal
+                is_breakout = True
                 old_red_line = prev_dn
                 red_distance = ((close - old_red_line) / old_red_line) * 100
-                
                 new_green_line = last_up
                 green_distance = ((close - new_green_line) / new_green_line) * 100
-                
-                breakout_result = (symbol, pct, close, vol_usdt, vm, rsi, last_trend,
-                                 old_red_line, red_distance, new_green_line, green_distance, 
-                                 candles_since_last, hour)
         
-        return pump_result, breakout_result
+        # Return results
+        basic_data = {
+            'symbol': symbol,
+            'hour': hour,
+            'pct': pct,
+            'close': close,
+            'vol_usdt': vol_usdt,
+            'vm': vm,
+            'rsi': rsi,
+            'candles_100': candles  # Keep candles for potential later use
+        }
         
-    except Exception as e:
-        # Silent errors for cleaner output
+        if is_pump and is_breakout:
+            # Both detected, return pump (will be caught by both handlers)
+            return 'both', {**basic_data, 
+                           'old_red_line': old_red_line,
+                           'red_distance': red_distance,
+                           'new_green_line': new_green_line,
+                           'green_distance': green_distance}
+        elif is_pump:
+            return 'pump', basic_data
+        elif is_breakout:
+            return 'breakout', {**basic_data,
+                               'old_red_line': old_red_line,
+                               'red_distance': red_distance,
+                               'new_green_line': new_green_line,
+                               'green_distance': green_distance}
+        
+        return None, None
+        
+    except:
         return None, None
 
-def check_all_symbols(symbols):
+# ==== STAGE 2: DEEP ANALYSIS (2100 candles for csince only) ====
+def calculate_csince_pump(symbol, current_pct):
     """
-    Scan all symbols for last candle only.
-    Returns: (pumps, breakouts)
+    Stage 2: Fetch 2100 candles ONLY to calculate candles since last pump.
     """
-    pumps = []
-    breakouts = []
+    try:
+        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=2100"
+        candles = session.get(url, timeout=5).json()
+        
+        if not candles or isinstance(candles, dict):
+            return 2100
+        
+        # Start from second-to-last (last closed candle)
+        last_idx = len(candles) - 2
+        
+        # Look backwards for previous pump
+        for i in range(last_idx - 1, max(0, last_idx - 1009), -1):
+            if i == 0:
+                break
+            prev_pct = ((float(candles[i][4]) - float(candles[i-1][4])) / float(candles[i-1][4])) * 100
+            if prev_pct >= PUMP_THRESHOLD:
+                return last_idx - i
+        
+        return 2100
+        
+    except:
+        return 2100
+
+def calculate_csince_breakout(symbol):
+    """
+    Stage 2: Fetch 2100 candles ONLY to calculate candles since last breakout.
+    """
+    try:
+        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=2100"
+        candles = session.get(url, timeout=5).json()
+        
+        if not candles or isinstance(candles, dict):
+            return 2100
+        
+        last_idx = len(candles) - 2
+        
+        # Look backwards for previous breakout
+        for look_back in range(1, min(2100, last_idx)):
+            check_idx = last_idx - look_back
+            if check_idx < 15:
+                break
+            
+            st_result = calculate_supertrend(candles[:check_idx+1])
+            if st_result:
+                last_trend, prev_trend, _, _, _ = st_result
+                if prev_trend == -1 and last_trend == 1:
+                    return look_back
+        
+        return 2100
+        
+    except:
+        return 2100
+
+# ==== MAIN SCANNING LOGIC ====
+def scan_all_symbols(symbols):
+    """
+    Two-stage scanning:
+    Stage 1: Quick scan all symbols with 100 candles
+    Stage 2: Deep analysis only for detected pumps/breakouts (2100 candles for csince)
+    """
+    pump_candidates = []
+    breakout_candidates = []
     
-    with ThreadPoolExecutor(max_workers=100) as ex:
-        futures = {ex.submit(scan_last_candle, s): s for s in symbols}
+    print(f"🔍 Stage 1: Quick scanning {len(symbols)} symbols with 100 candles...")
+    stage1_start = time.time()
+    
+    # Stage 1: Quick scan
+    with ThreadPoolExecutor(max_workers=1100) as ex:
+        futures = {ex.submit(quick_scan, s): s for s in symbols}
         
         for f in as_completed(futures):
-            pump_res, breakout_res = f.result()
+            alert_type, data = f.result()
             
-            if pump_res:
-                pumps.append(pump_res)
-            if breakout_res:
-                breakouts.append(breakout_res)
+            if alert_type == 'pump':
+                pump_candidates.append(data)
+            elif alert_type == 'breakout':
+                breakout_candidates.append(data)
+            elif alert_type == 'both':
+                pump_candidates.append(data)
+                breakout_candidates.append(data)
     
-    return pumps, breakouts
+    stage1_duration = time.time() - stage1_start
+    print(f"✓ Stage 1 completed in {stage1_duration:.2f}s")
+    print(f"  Found: {len(pump_candidates)} pumps, {len(breakout_candidates)} breakouts")
+    
+    # Stage 2: Deep analysis for csince
+    pumps_final = []
+    breakouts_final = []
+    
+    if pump_candidates or breakout_candidates:
+        print(f"\n🔬 Stage 2: Deep analysis for {len(pump_candidates) + len(breakout_candidates)} coins...")
+        stage2_start = time.time()
+        
+        # Calculate csince for pumps
+        if pump_candidates:
+            with ThreadPoolExecutor(max_workers=100) as ex:
+                futures = {ex.submit(calculate_csince_pump, d['symbol'], d['pct']): d for d in pump_candidates}
+                
+                for f in as_completed(futures):
+                    csince = f.result()
+                    data = futures[f]
+                    
+                    pumps_final.append((
+                        data['symbol'], data['pct'], data['close'], data['vol_usdt'],
+                        data['vm'], data['rsi'], csince, data['hour']
+                    ))
+        
+        # Calculate csince for breakouts
+        if breakout_candidates:
+            with ThreadPoolExecutor(max_workers=100) as ex:
+                futures = {ex.submit(calculate_csince_breakout, d['symbol']): d for d in breakout_candidates}
+                
+                for f in as_completed(futures):
+                    csince = f.result()
+                    data = futures[f]
+                    
+                    breakouts_final.append((
+                        data['symbol'], data['pct'], data['close'], data['vol_usdt'],
+                        data['vm'], data['rsi'], 1,  # direction (always 1 for breakout up)
+                        data['old_red_line'], data['red_distance'],
+                        data['new_green_line'], data['green_distance'],
+                        csince, data['hour']
+                    ))
+        
+        stage2_duration = time.time() - stage2_start
+        print(f"✓ Stage 2 completed in {stage2_duration:.2f}s")
+    
+    return pumps_final, breakouts_final
 
 # ==== REPORTING ====
 def format_pump_report(pumps, duration):
@@ -322,7 +428,7 @@ def format_pump_report(pumps, duration):
     report = f"💰 <b>PUMP ALERTS</b> 💰\n"
     report += f"⏱ Scan: {duration:.2f}s | Found: {len(pumps)}\n\n"
     
-    for h in sorted(grouped, reverse=True):  # Most recent first
+    for h in sorted(grouped, reverse=True):
         items = sorted(grouped[h], key=lambda x: x[3], reverse=True)
         report += f"⏰ {h} UTC\n"
         
@@ -338,7 +444,7 @@ def format_pump_report(pumps, duration):
                     icon = "✅"
                 elif rsi >= 66:
                     icon = "🔴"
-                elif rsi >= 50:
+                elif rsi >= 100:
                     icon = "🟢"
                 else:
                     icon = "🟡"
@@ -370,7 +476,18 @@ def format_breakout_report(breakouts, duration):
             rsi_str = f"{rsi:.1f}" if rsi else "N/A"
             csince_str = f"{csince:03d}"
             
-            line1 = f"{sym:6s} {pct:5.2f} {rsi_str:>4s} {vm:4.1f} {format_volume(vol_usdt):4s} {csince_str}"
+            # Check if coin meets premium quality criteria
+            meets_criteria = (
+                vm >= 3.0 and                    # Strong volume
+                rsi and 55 <= rsi <= 70 and      # Healthy momentum, not exhausted
+                green_distance > 2.0 and         # Confirmed close above new support
+                red_distance > 0.8               # Solid break of old resistance
+            )
+            
+            # Add star emoji for premium breakouts
+            quality_icon = "⭐ " if meets_criteria else ""
+            
+            line1 = f"{quality_icon}{sym:6s} {pct:5.2f} {rsi_str:>4s} {vm:4.1f} {format_volume(vol_usdt):4s} {csince_str}"
             line2 = f"       🔴Old: ${old_red_line:.5f} (+{red_distance:.2f}%)"
             line3 = f"       🟢New: ${new_green_line:.5f} (+{green_distance:.2f}%)"
             
@@ -381,16 +498,18 @@ def format_breakout_report(breakouts, duration):
     
     report += "💡 🔴Old = Last downtrend (broke above!)\n"
     report += "💡 🟢New = New uptrend (support)\n"
+    report += "💡 ⭐ = Premium breakout (VM≥3, RSI 55-70, strong distances)\n"
     
     return report
 
 # ==== Main ====
 def main():
     print("="*80)
-    print("🤖 OPTIMIZED CRYPTO SCANNER - LAST CANDLE ONLY")
+    print("🚀 ULTRA-FAST CRYPTO SCANNER - TWO-STAGE ANALYSIS")
     print("="*80)
-    print(f"📊 PUMP alerts → Bot 1 | 📈 BREAKOUT alerts → Bot 2")
-    print(f"⚡ Focus: LAST CLOSED CANDLE ONLY (ultra-fast scanning)")
+    print(f"⚡ Stage 1: Quick scan with 100 candles (ALL symbols)")
+    print(f"🔬 Stage 2: Deep analysis with 2100 candles (DETECTED coins only)")
+    print(f"📊 PUMP → Bot 1 | 📈 BREAKOUT → Bot 2")
     print("="*80)
     
     symbols = get_usdt_pairs()
@@ -404,21 +523,19 @@ def main():
         now = datetime.now(timezone.utc)
         print(f"\n{'='*80}")
         print(f"🕐 Scan started: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        print(f"{'='*80}")
+        print(f"{'='*80}\n")
         
-        # === UNIFIED SCAN ===
-        scan_start = time.time()
-        pumps, breakouts = check_all_symbols(symbols)
-        scan_duration = time.time() - scan_start
+        # === TWO-STAGE SCAN ===
+        total_start = time.time()
+        pumps, breakouts = scan_all_symbols(symbols)
+        total_duration = time.time() - total_start
         
-        print(f"\n✓ Scan completed in {scan_duration:.2f}s")
-        print(f"  Pumps found: {len(pumps)} | Breakouts found: {len(breakouts)}")
+        print(f"\n✓ Complete scan finished in {total_duration:.2f}s")
         
         # === FILTER NEW ALERTS ===
         fresh_pumps = [p for p in pumps if (p[0], p[7]) not in reported_pumps]
         fresh_breakouts = [b for b in breakouts if (b[0], b[12]) not in reported_breakouts]
         
-        # Add to reported sets
         for p in fresh_pumps:
             reported_pumps.add((p[0], p[7]))
         for b in fresh_breakouts:
@@ -428,13 +545,13 @@ def main():
         
         # === SEND ALERTS ===
         if fresh_pumps:
-            msg = format_pump_report(fresh_pumps, scan_duration)
+            msg = format_pump_report(fresh_pumps, total_duration)
             if msg:
                 print("\n📤 Sending PUMP alert...")
                 send_telegram(msg[:4096], TELEGRAM_BOT_TOKEN_1, TELEGRAM_CHAT_ID_1, "PUMP")
         
         if fresh_breakouts:
-            msg = format_breakout_report(fresh_breakouts, scan_duration)
+            msg = format_breakout_report(fresh_breakouts, total_duration)
             if msg:
                 print("\n📤 Sending BREAKOUT alert...")
                 send_telegram(msg[:4096], TELEGRAM_BOT_TOKEN_2, TELEGRAM_CHAT_ID_2, "BREAKOUT")
@@ -442,7 +559,7 @@ def main():
         # === WAIT FOR NEXT HOUR ===
         server_time = get_binance_server_time()
         next_hour = (server_time // 3600 + 1) * 3600
-        sleep_time = max(60, next_hour - server_time + 5)  # Min 60s, +5s buffer
+        sleep_time = max(60, next_hour - server_time + 5)
         
         print(f"\n😴 Sleeping {sleep_time:.0f}s until next hour...\n")
         time.sleep(sleep_time)
