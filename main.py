@@ -46,20 +46,89 @@ adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, ma
 session.mount("https://", adapter)
 
 # ==== Telegram ====
-def send_telegram(msg, bot_token, chat_id, alert_type):
-    """Send message to specific Telegram bot"""
+def send_telegram(msg, bot_token, chat_id, alert_type, max_retries=3):
+    """Send message to specific Telegram bot with retry logic"""
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    try:
-        requests.post(url, data={
-            "chat_id": chat_id,
-            "text": msg,
-            "parse_mode": "HTML"
-        }, timeout=60)
-        print(f"✓ {alert_type} alert sent to Telegram")
-    except Exception as e:
-        print(f"✗ Telegram error for {alert_type}:", e)
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, data={
+                "chat_id": chat_id,
+                "text": msg,
+                "parse_mode": "HTML"
+            }, timeout=60)
+            
+            if response.status_code == 200:
+                print(f"✓ {alert_type} alert sent to Telegram")
+                return True
+            else:
+                print(f"⚠ Telegram API returned status {response.status_code} for {alert_type}")
+                print(f"   Response: {response.text[:200]}")
+                
+        except requests.exceptions.ConnectionError as e:
+            print(f"✗ Connection error for {alert_type} (attempt {attempt+1}/{max_retries}): Network unreachable")
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 5  # 5s, 10s, 15s
+                print(f"   Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                print(f"   ⚠ Failed to send {alert_type} alert after {max_retries} attempts")
+                print(f"   Check your internet connection and firewall settings")
+                # Save message to file for later
+                timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                save_failed_message(msg, alert_type, timestamp)
+                
+        except requests.exceptions.Timeout as e:
+            print(f"✗ Timeout error for {alert_type} (attempt {attempt+1}/{max_retries})")
+            if attempt < max_retries - 1:
+                time.sleep(5)
+                
+        except Exception as e:
+            print(f"✗ Telegram error for {alert_type}: {str(e)[:200]}")
+            timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            save_failed_message(msg, alert_type, timestamp)
+            break
+    
+    return False
 
 # ==== Utils ====
+# ==== Utils ====
+def check_network_connectivity():
+    """Check if we can reach the internet"""
+    test_urls = [
+        "https://api.binance.com/api/v3/ping",
+        "https://api.telegram.org",
+        "https://www.google.com"
+    ]
+    
+    for url in test_urls:
+        try:
+            response = requests.get(url, timeout=5)
+            print(f"✓ Network connectivity OK (tested {url})")
+            return True
+        except:
+            continue
+    
+    print("✗ WARNING: No network connectivity detected!")
+    print("  Unable to reach Binance, Telegram, or Google")
+    print("  Please check your internet connection")
+    return False
+
+def save_failed_message(msg, alert_type, timestamp):
+    """Save failed Telegram message to file for manual retry"""
+    try:
+        filename = f"/home/claude/failed_messages_{alert_type}.log"
+        with open(filename, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*80}\n")
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write(f"Alert Type: {alert_type}\n")
+            f.write(f"{'='*80}\n")
+            f.write(msg)
+            f.write(f"\n{'='*80}\n\n")
+        print(f"   💾 Message saved to {filename} for later retry")
+    except Exception as e:
+        print(f"   ⚠ Could not save message to file: {e}")
+
 def format_volume(v):
     if v >= 1_000_000:
         return f"{v/1_000_000:.2f}"
@@ -409,6 +478,12 @@ def main():
     print(f"📊 PUMP alerts → Telegram Bot 1")
     print(f"📈 BREAKOUT alerts → Telegram Bot 2")
     print("="*80)
+    
+    # Check network connectivity
+    print("\n🌐 Checking network connectivity...")
+    if not check_network_connectivity():
+        print("⚠ WARNING: Continuing anyway, but Telegram alerts may fail")
+        print("⚠ Messages will be saved to log files if sending fails")
     
     symbols = get_usdt_pairs()
     if not symbols:
