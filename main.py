@@ -7,8 +7,8 @@ from collections import defaultdict
 
 # ==== Settings ====
 BINANCE_API = "https://api.binance.com"
-TELEGRAM_BOT_TOKEN_2 = os.getenv("TELEGRAM_BOT_TOKEN_2")
-TELEGRAM_CHAT_ID_2 = os.getenv("TELEGRAM_CHAT_ID_2")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 RSI_PERIOD = 14
 reported = set()  # avoid duplicate (symbol, hour)
 
