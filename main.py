@@ -190,14 +190,14 @@ def get_usdt_pairs():
         print(f"✗ Exchange info error: {e}")
         return []
 
-# ==== STAGE 1: QUICK DETECTION (24 candles) ====
+# ==== STAGE 1: QUICK DETECTION (50 candles) ====
 def quick_scan(symbol):
     """
-    Stage 1: Quick scan with 24 candles to detect pump or breakout.
+    Stage 1: Quick scan with 50 candles to detect pump or breakout.
     Returns: ('pump', basic_data) or ('breakout', basic_data) or (None, None)
     """
     try:
-        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=24"
+        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
         candles = session.get(url, timeout=5).json()
         
         if not candles or isinstance(candles, dict) or len(candles) < 20:
@@ -218,14 +218,14 @@ def quick_scan(symbol):
         vol_usdt = open_p * volume
         pct = ((close - prev_close) / prev_close) * 100
         
-        # Calculate basic metrics (we have enough data with 24 candles)
+        # Calculate basic metrics (we have enough data with 50 candles)
         # Volume multiplier (20-candle MA)
         ma_start = max(0, last_idx - 19)
         ma_vol = [float(candles[j][1]) * float(candles[j][5]) for j in range(ma_start, last_idx + 1)]
         ma = sum(ma_vol) / len(ma_vol)
         vm = vol_usdt / ma if ma > 0 else 1.0
         
-        # RSI (we have 24 candles, enough for RSI-14)
+        # RSI (we have 50 candles, enough for RSI-14)
         all_closes = [float(candles[j][4]) for j in range(0, last_idx + 1)]
         rsi = calculate_rsi(all_closes, RSI_PERIOD)
         
@@ -258,7 +258,7 @@ def quick_scan(symbol):
             'vol_usdt': vol_usdt,
             'vm': vm,
             'rsi': rsi,
-            'candles_24': candles  # Keep candles for potential later use
+            'candles_50': candles  # Keep candles for potential later use
         }
         
         if is_pump and is_breakout:
@@ -298,7 +298,7 @@ def calculate_csince_pump(symbol, current_pct):
         last_idx = len(candles) - 2
         
         # Look backwards for previous pump
-        for i in range(last_idx - 1, max(0, last_idx - 249), -1):
+        for i in range(last_idx - 1, max(0, last_idx - 509), -1):
             if i == 0:
                 break
             prev_pct = ((float(candles[i][4]) - float(candles[i-1][4])) / float(candles[i-1][4])) * 100
@@ -344,13 +344,13 @@ def calculate_csince_breakout(symbol):
 def scan_all_symbols(symbols):
     """
     Two-stage scanning:
-    Stage 1: Quick scan all symbols with 24 candles
+    Stage 1: Quick scan all symbols with 50 candles
     Stage 2: Deep analysis only for detected pumps/breakouts (250 candles for csince)
     """
     pump_candidates = []
     breakout_candidates = []
     
-    print(f"🔍 Stage 1: Quick scanning {len(symbols)} symbols with 24 candles...")
+    print(f"🔍 Stage 1: Quick scanning {len(symbols)} symbols with 50 candles...")
     stage1_start = time.time()
     
     # Stage 1: Quick scan
@@ -495,7 +495,7 @@ def main():
     print("="*80)
     print("🚀 ULTRA-FAST CRYPTO SCANNER - TWO-STAGE ANALYSIS")
     print("="*80)
-    print(f"⚡ Stage 1: Quick scan with 24 candles (ALL symbols)")
+    print(f"⚡ Stage 1: Quick scan with 50 candles (ALL symbols)")
     print(f"🔬 Stage 2: Deep analysis with 250 candles (DETECTED coins only)")
     print(f"📊 PUMP → Bot 1 | 📈 BREAKOUT → Bot 2")
     print("="*80)
