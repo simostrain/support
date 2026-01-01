@@ -278,53 +278,45 @@ def format_breakout_report(fresh, duration):
     if not fresh:
         return None
     
-    # Filter breakouts based on requirements
-    filtered = []
-    skipped_reasons = defaultdict(int)
+    # Check which breakouts meet all requirements
+    qualified_count = 0
     
     for p in fresh:
         symbol, pct, close, vol_usdt, vm, rsi, direction, old_red_line, red_distance, new_green_line, green_distance, hour = p
         
-        # Track why breakouts are filtered out
-        reasons = []
-        if vm < 0.1:
-            reasons.append(f"VM={vm:.1f}<0.1")
-        if rsi is None or not (55 <= rsi <= 70):
-            rsi_str = "None" if rsi is None else f"{rsi:.1f}"
-            reasons.append(f"RSI={rsi_str} not in [55,70]")
-        if green_distance <= 2.0:
-            reasons.append(f"Green={green_distance:.2f}%≤2%")
-        if red_distance <= 0.8:
-            reasons.append(f"Red={red_distance:.2f}%≤0.8%")
+        # Check if meets all requirements
+        meets_all = (
+            vm >= 3.0 and
+            rsi is not None and 55 <= rsi <= 70 and
+            green_distance > 2.0 and
+            red_distance > 0.8
+        )
         
-        if reasons:
-            print(f"  ❌ Filtered {symbol}: {', '.join(reasons)}")
-            for reason in reasons:
-                skipped_reasons[reason] += 1
+        if meets_all:
+            qualified_count += 1
+            print(f"  ⭐ Qualified {symbol}: VM={vm:.1f}, RSI={rsi:.1f}, Green={green_distance:.2f}%, Red={red_distance:.2f}%")
         else:
-            # All filters passed
-            filtered.append(p)
-            print(f"  ✅ Passed {symbol}: VM={vm:.1f}, RSI={rsi:.1f}, Green={green_distance:.2f}%, Red={red_distance:.2f}%")
+            reasons = []
+            if vm < 3.0:
+                reasons.append(f"VM={vm:.1f}")
+            if rsi is None or not (55 <= rsi <= 70):
+                rsi_str = "None" if rsi is None else f"{rsi:.1f}"
+                reasons.append(f"RSI={rsi_str}")
+            if green_distance <= 2.0:
+                reasons.append(f"Green={green_distance:.2f}%")
+            if red_distance <= 0.8:
+                reasons.append(f"Red={red_distance:.2f}%")
+            print(f"  ✓ Breakout {symbol}: {', '.join(reasons)}")
     
-    # Print summary of filtered results
-    if skipped_reasons:
-        print("\n📊 Filter Summary:")
-        for reason, count in sorted(skipped_reasons.items(), key=lambda x: -x[1]):
-            print(f"  {reason}: {count} breakouts")
-    
-    if not filtered:
-        print(f"\n⚠️  All {len(fresh)} breakouts were filtered out")
-        return None
-    
-    print(f"\n✅ {len(filtered)} breakouts passed all filters (out of {len(fresh)} total)")
+    print(f"\n⭐ {qualified_count} qualified out of {len(fresh)} total breakouts")
     
     grouped = defaultdict(list)
-    for p in filtered:
+    for p in fresh:
         grouped[p[11]].append(p)
 
     report = f"🚀 <b>TREND BREAKOUT ALERTS</b> 🚀\n"
     report += f"⏱ Scan: {duration:.2f}s\n"
-    report += f"📈 Qualified: {len(filtered)}/{len(fresh)}\n\n"
+    report += f"⭐ Qualified: {qualified_count}/{len(fresh)}\n\n"
     
     for h in sorted(grouped):
         items = sorted(grouped[h], key=lambda x: x[8], reverse=True)
@@ -332,6 +324,16 @@ def format_breakout_report(fresh, duration):
         report += f"  ⏰ {h} UTC\n"
         
         for symbol, pct, close, vol_usdt, vm, rsi, direction, old_red_line, red_distance, new_green_line, green_distance, hour in items:
+            # Check if this breakout meets all requirements
+            meets_all = (
+                vm >= 3.0 and
+                rsi is not None and 55 <= rsi <= 70 and
+                green_distance > 2.0 and
+                red_distance > 0.8
+            )
+            
+            emoji = "⭐" if meets_all else "✅"
+            
             sym = symbol.replace("USDT","")
             rsi_str = f"{rsi:.1f}" if rsi is not None else "N/A"
             
@@ -339,11 +341,11 @@ def format_breakout_report(fresh, duration):
             line2 = f"       🔴Old: ${old_red_line:.5f} (+{red_distance:.2f}%)"
             line3 = f"       🟢New: ${new_green_line:.5f} (+{green_distance:.2f}%)"
             
-            report += f"✅ <code>{line1}</code>\n"
+            report += f"{emoji} <code>{line1}</code>\n"
             report += f"   <code>{line2}</code>\n"
             report += f"   <code>{line3}</code>\n\n"
         
-    report += "💡 Filters: VM≥0.1, RSI 55-70, Green>2%, Red>0.8%\n"
+    report += "💡 ⭐ = Meets all: VM≥3.0, RSI 55-70, Green>2%, Red>0.8%\n"
     report += "💡 🔴Old = Last downtrend line (broke above it!)\n"
     report += "💡 🟢New = New uptrend line (support now)\n"
     
@@ -357,7 +359,7 @@ def main():
 
     print("Starting breakout scanner...")
     print(f"Monitoring {len(symbols)} pairs for trend reversals (downtrend → uptrend)")
-    print("Filters: VM≥0.1, RSI 55-70, Green>2%, Red>0.8%")
+    print("⭐ will mark breakouts that meet: VM≥3.0, RSI 55-70, Green>2%, Red>0.8%")
     print("-" * 80)
 
     while True:
@@ -388,8 +390,6 @@ def main():
                 print(msg)
                 print("="*80)
                 send_telegram(msg[:4096])
-            else:
-                print("No breakouts passed the filters.")
         else:
             print(f"No new breakouts found.")
 
