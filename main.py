@@ -287,8 +287,8 @@ def format_breakout_report(fresh, duration):
         
         # Track why breakouts are filtered out
         reasons = []
-        if vm < 3.0:
-            reasons.append(f"VM={vm:.1f}<3.0")
+        if vm < 0.1:
+            reasons.append(f"VM={vm:.1f}<0.1")
         if rsi is None or not (55 <= rsi <= 70):
             rsi_str = "None" if rsi is None else f"{rsi:.1f}"
             reasons.append(f"RSI={rsi_str} not in [55,70]")
@@ -343,7 +343,7 @@ def format_breakout_report(fresh, duration):
             report += f"   <code>{line2}</code>\n"
             report += f"   <code>{line3}</code>\n\n"
         
-    report += "💡 Filters: VM≥3.0, RSI 55-70, Green>2%, Red>0.8%\n"
+    report += "💡 Filters: VM≥0.1, RSI 55-70, Green>2%, Red>0.8%\n"
     report += "💡 🔴Old = Last downtrend line (broke above it!)\n"
     report += "💡 🟢New = New uptrend line (support now)\n"
     
@@ -357,7 +357,7 @@ def main():
 
     print("Starting breakout scanner...")
     print(f"Monitoring {len(symbols)} pairs for trend reversals (downtrend → uptrend)")
-    print("Filters: VM≥3.0, RSI 55-70, Green>2%, Red>0.8%")
+    print("Filters: VM≥0.1, RSI 55-70, Green>2%, Red>0.8%")
     print("-" * 80)
 
     while True:
