@@ -9,8 +9,8 @@ from collections import defaultdict
 BINANCE_API = "https://api.binance.com"
 
 # Telegram Bot for BREAKOUT alerts
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_2")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID_2")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 RSI_PERIOD = 14
 reported_breakouts = set()
