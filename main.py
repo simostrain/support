@@ -9,8 +9,8 @@ from collections import defaultdict
 BINANCE_API = "https://api.binance.com"
 
 # Telegram Bot for BREAKOUT alerts
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_2")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID_2")
 
 RSI_PERIOD = 14
 reported_breakouts = set()
@@ -184,14 +184,14 @@ def get_usdt_pairs():
         print(f"✗ Exchange info error: {e}")
         return []
 
-# ==== STAGE 1: BREAKOUT DETECTION (100 candles) ====
+# ==== STAGE 1: BREAKOUT DETECTION (500 candles) ====
 def detect_breakout(symbol):
     """
-    Stage 1: Detect breakout with 100 candles.
+    Stage 1: Detect breakout with 500 candles.
     Returns: basic_data if breakout detected, None otherwise
     """
     try:
-        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=100"
+        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=500"
         candles = session.get(url, timeout=5).json()
         
         if not candles or isinstance(candles, dict) or len(candles) < 20:
@@ -225,8 +225,8 @@ def detect_breakout(symbol):
             green_distance = ((close - new_green_line) / new_green_line) * 100
             
             # Look backwards for previous breakout (csince calculation)
-            csince = 250  # default
-            for look_back in range(1, min(99, last_idx)):
+            csince = 500  # default
+            for look_back in range(1, min(499, last_idx)):
                 check_idx = last_idx - look_back
                 if check_idx < 15:
                     break
@@ -294,12 +294,12 @@ def calculate_rsi_and_vm(symbol):
 def scan_all_symbols(symbols):
     """
     Two-stage scanning:
-    Stage 1: Detect breakouts with 100 candles
+    Stage 1: Detect breakouts with 500 candles
     Stage 2: Calculate RSI and VM with 25 candles for detected breakouts
     """
     breakout_candidates = []
     
-    print(f"🔍 Stage 1: Detecting breakouts with 100 candles...")
+    print(f"🔍 Stage 1: Detecting breakouts with 500 candles...")
     stage1_start = time.time()
     
     # Stage 1: Detect breakouts
@@ -390,7 +390,7 @@ def main():
     print("="*80)
     print("🚀 BREAKOUT SCANNER - TWO-STAGE ANALYSIS")
     print("="*80)
-    print(f"⚡ Stage 1: Detect breakouts with 100 candles (ALL symbols)")
+    print(f"⚡ Stage 1: Detect breakouts with 500 candles (ALL symbols)")
     print(f"🔬 Stage 2: Calculate RSI & VM with 25 candles (DETECTED breakouts only)")
     print("="*80)
     
