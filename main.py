@@ -14,8 +14,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 RSI_PERIOD = 14
 reported_retests = set()
 
-RETEST_PROXIMITY = 2.0
-MIN_CANDLES_AFTER_BREAKOUT = 5
+MIN_CANDLES_AFTER_BREAKOUT = 5  # Min uptrend duration
 
 CUSTOM_TICKERS = [
     "At","A2Z","ACE","ACH","ACT","ADA","ADX","AGLD","AIXBT","Algo","ALICE","ALPINE","ALT","AMP","ANKR","APE",
@@ -53,7 +52,7 @@ def send_telegram(msg, max_retries=3):
         try:
             response = requests.post(url, data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg[:3900]  # Safe margin
+                "text": msg[:3900]
             }, timeout=10)
             
             if response.status_code == 200:
@@ -166,25 +165,31 @@ def get_usdt_pairs():
         print(f"✗ Exchange info error: {e}")
         return []
 
-# ==== Detection ====
+# ==== Detection: TRUE SUPPORT REJECTION ====
 def detect_retest(symbol):
     try:
         url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
         candles = session.get(url, timeout=5).json()
         if not candles or isinstance(candles, dict) or len(candles) < 30:
             return None
+
         last_idx = len(candles) - 2
         last_candle = candles[last_idx]
         candle_time = datetime.fromtimestamp(last_candle[0]/1000, tz=timezone.utc)
         time_str = candle_time.strftime("%Y-%m-%d %H:%M")
-        close = float(last_candle[4])
+
         st_result = calculate_supertrend(candles[:last_idx+1])
         if not st_result:
             return None
+
         trend_list = st_result['trend_list']
         up_list = st_result['up_list']
+
+        # Must be in uptrend
         if trend_list[-1] != 1:
             return None
+
+        # Min uptrend duration
         uptrend_candles = 0
         for i in range(len(trend_list) - 1, -1, -1):
             if trend_list[i] == 1:
@@ -193,10 +198,19 @@ def detect_retest(symbol):
                 break
         if uptrend_candles < MIN_CANDLES_AFTER_BREAKOUT:
             return None
+
         current_support = up_list[-1]
-        distance_from_support = ((close - current_support) / current_support) * 100
-        if distance_from_support < 0 or distance_from_support > RETEST_PROXIMITY:
+        low = float(last_candle[3])
+        close = float(last_candle[4])
+
+        # 🔑 CRITICAL: True retest logic
+        touched_or_broken = (low <= current_support)      # Low touched or broke support
+        closed_above = (close > current_support)         # Closed above = bullish rejection
+
+        if not (touched_or_broken and closed_above):
             return None
+
+        # Confirm there was a meaningful move before pullback
         highest_distance = 0
         check_range = min(8, len(candles) - 12)
         for i in range(last_idx - check_range, last_idx):
@@ -207,8 +221,11 @@ def detect_retest(symbol):
             check_distance = ((check_close - check_support) / check_support) * 100
             if check_distance > highest_distance:
                 highest_distance = check_distance
+
         if highest_distance < 3.0:
             return None
+
+        # Optional: ensure price was moving toward support (not away)
         recent_distances = []
         for i in range(max(0, last_idx - 2), last_idx + 1):
             if i < 11:
@@ -217,46 +234,50 @@ def detect_retest(symbol):
             s = up_list[i - 11]
             d = ((c - s) / s) * 100
             recent_distances.append(d)
+
         if len(recent_distances) >= 2 and recent_distances[-1] > recent_distances[0]:
-            return None
+            return None  # Price moving away from support
+
+        # Final data
         prev_close = float(candles[last_idx - 1][4])
         pct = ((close - prev_close) / prev_close) * 100
-        uptrend_start_idx = len(trend_list) - uptrend_candles
-        if uptrend_start_idx + 10 < len(candles):
-            uptrend_start_time = datetime.fromtimestamp(candles[uptrend_start_idx + 10][0]/1000, tz=timezone.utc)
-        else:
-            uptrend_start_time = candle_time
+
         return {
             'symbol': symbol,
             'time_str': time_str,
             'pct': pct,
             'close': close,
             'support_line': current_support,
-            'distance_from_support': distance_from_support,
+            'distance_from_support': ((close - current_support) / current_support) * 100,
             'uptrend_candles': uptrend_candles,
-            'highest_distance': highest_distance,
-            'uptrend_start_time': uptrend_start_time.strftime("%Y-%m-%d %H:%M")
+            'highest_distance': highest_distance
         }
-    except:
+
+    except Exception as e:
         return None
 
+# ==== RSI & VM Calculation ====
 def calculate_rsi_and_vm(symbol):
     try:
         url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=25"
         candles = session.get(url, timeout=5).json()
         if not candles or isinstance(candles, dict) or len(candles) < 20:
             return None, None, None
+
         last_idx = len(candles) - 2
         last_candle = candles[last_idx]
         open_p = float(last_candle[1])
         volume = float(last_candle[5])
         vol_usdt = open_p * volume
+
         all_closes = [float(candles[j][4]) for j in range(0, last_idx + 1)]
         rsi = calculate_rsi(all_closes, RSI_PERIOD)
+
         ma_start = max(0, last_idx - 19)
         ma_vol = [float(candles[j][1]) * float(candles[j][5]) for j in range(ma_start, last_idx + 1)]
         ma = sum(ma_vol) / len(ma_vol)
         vm = vol_usdt / ma if ma > 0 else 1.0
+
         return rsi, vm, vol_usdt
     except:
         return None, None, None
@@ -270,6 +291,7 @@ def scan_all_symbols(symbols):
             data = f.result()
             if data:
                 retest_candidates.append(data)
+
     retests_final = []
     if retest_candidates:
         with ThreadPoolExecutor(max_workers=50) as ex:
@@ -289,12 +311,12 @@ def scan_all_symbols(symbols):
                         data['distance_from_support'],
                         data['uptrend_candles'],
                         data['highest_distance'],
-                        data['uptrend_start_time'],
+                        None,  # unused
                         data['time_str']
                     ))
     return retests_final
 
-# ==== Formatting (FINAL ALIGNMENT) ====
+# ==== Compact Output (Your Exact Format) ====
 def format_compact_retest_report(retests, duration):
     if not retests:
         return None
@@ -307,13 +329,12 @@ def format_compact_retest_report(retests, duration):
     lines.append(f"🎯 RETESTS (1H) | Found: {len(retests)} | Scan: {duration:.1f}s")
 
     for h in sorted(grouped, reverse=True):
-        # Sort by distance (closest first) — optional but useful
-        sorted_items = sorted(grouped[h], key=lambda x: x[7])  # x[7] = distance
+        # Sort by distance (closest = best)
+        sorted_items = sorted(grouped[h], key=lambda x: x[7])
         for item in sorted_items:
-            symbol, pct, close, vol_usdt, vm, rsi, support_line, distance, uptrend_candles, highest_distance, uptrend_start_time, time_str = item
+            symbol, pct, close, vol_usdt, vm, rsi, support_line, distance, uptrend_candles, highest_distance, _, time_str = item
             sym = symbol.replace("USDT", "")[:6]
 
-            # Format exactly as you showed: tight spacing, no extra zeros
             line = (
                 f"{sym:>6s} "
                 f"{pct:5.2f} "
@@ -325,12 +346,13 @@ def format_compact_retest_report(retests, duration):
             )
             lines.append(line)
 
-    lines.append("💡 Lower DIST = better signal")
+    lines.append("💡 True support rejection: Low ≤ Support & Close > Support")
     return "\n".join(lines)
-# ==== Main ====
+
+# ==== Main Loop ====
 def main():
     print("="*80)
-    print("🎯 RETEST SCANNER - FINAL COMPACT FORMAT")
+    print("🎯 BULLISH REJECTION SCANNER (1H) - TRUE SUPPORT TEST")
     print("="*80)
 
     symbols = get_usdt_pairs()
