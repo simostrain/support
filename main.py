@@ -45,7 +45,6 @@ session.mount("https://", adapter)
 
 # ==== Telegram ====
 def send_telegram(msg, max_retries=3):
-    """Send message to Telegram bot with retry logic"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
     for attempt in range(max_retries):
@@ -59,10 +58,14 @@ def send_telegram(msg, max_retries=3):
             if response.status_code == 200:
                 print(f"✓ RETEST alert sent")
                 return True
+            else:
+                print(f"✗ Telegram error (status {response.status_code}): {response.text}")
         except Exception as e:
+            print(f"✗ Telegram exception (attempt {attempt+1}): {e}")
             if attempt < max_retries - 1:
                 time.sleep(2)
     
+    print("✗ Failed to send Telegram message after retries.")
     return False
 
 # ==== Utils ====
