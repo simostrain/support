@@ -303,21 +303,36 @@ def scan_all_symbols(symbols):
 def format_compact_retest_report(retests, duration):
     if not retests:
         return None
+
     grouped = defaultdict(list)
     for r in retests:
         grouped[r[11]].append(r)
+
     lines = []
     lines.append(f"🎯 SUPPORT RETEST ALERTS (1H) | Found: {len(retests)} | Scan: {duration:.1f}s")
     lines.append("")
+
     for h in sorted(grouped, reverse=True):
         for item in grouped[h]:
             symbol, pct, close, vol_usdt, vm, rsi, support_line, distance, uptrend_candles, highest_distance, uptrend_start_time, time_str = item
             sym = symbol.replace("USDT", "")
             vol_str = format_volume(vol_usdt)
-            line = f"{sym:<7s} {pct:6.2f}% {rsi:4.1f} {vm:3.1f}x {vol_str:>6s} +{distance:5.2f}% {uptrend_candles}h +{highest_distance:4.1f}%"
+
+            # Remove % signs and + signs, keep numbers clean
+            line = (
+                f"{sym:<7s} "
+                f"{pct:6.2f} "
+                f"{rsi:4.1f} "
+                f"{vm:3.1f}x "
+                f"{vol_str:>5s} "
+                f"{distance:5.2f} "
+                f"{uptrend_candles:2d} "
+                f"{highest_distance:4.1f}"
+            )
             lines.append(line)
         lines.append("")
-    lines.append("💡 Retesting support in uptrend | Distance ↓ = stronger signal")
+
+    lines.append("💡 Format: SYM %CHG RSI VMx VOL DIST UPTRENDh PEAK")
     return "\n".join(lines)
 
 # ==== Main ====
