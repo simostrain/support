@@ -8,12 +8,16 @@ from collections import defaultdict
 # ==== Settings ====
 BINANCE_API = "https://api.binance.com"
 
-# Telegram Bot for BREAKOUT alerts
+# Telegram Bot for RETEST alerts
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 RSI_PERIOD = 14
-reported_breakouts = set()
+reported_retests = set()
+
+# Retest settings
+RETEST_PROXIMITY = 2.0  # السعر يجب يكون ضمن 2% من الخط الأخضر
+MIN_CANDLES_AFTER_BREAKOUT = 5  # الاتجاه الصاعد يجب يكون موجود من 5 شمعات على الأقل
 
 CUSTOM_TICKERS = [
     "At","A2Z","ACE","ACH","ACT","ADA","ADX","AGLD","AIXBT","Algo","ALICE","ALPINE","ALT","AMP","ANKR","APE",
@@ -53,7 +57,7 @@ def send_telegram(msg, max_retries=3):
             }, timeout=10)
             
             if response.status_code == 200:
-                print(f"✓ BREAKOUT alert sent")
+                print(f"✓ RETEST alert sent")
                 return True
         except Exception as e:
             if attempt < max_retries - 1:
@@ -63,7 +67,11 @@ def send_telegram(msg, max_retries=3):
 
 # ==== Utils ====
 def format_volume(v):
-    return f"{v/1_000_000:.2f}"
+    """Format volume in K or M"""
+    if v >= 1_000_000:
+        return f"{v/1_000_000:.0f}M"
+    else:
+        return f"{v/1_000:.0f}K"
 
 def get_binance_server_time():
     try:
@@ -162,13 +170,11 @@ def calculate_supertrend(candles, atr_period=10, multiplier=3.0):
         
         trend_list.append(trend)
     
-    last_trend = trend_list[-1]
-    prev_trend = trend_list[-2] if len(trend_list) > 1 else last_trend
-    last_up = up_list[-1]
-    last_dn = dn_list[-1]
-    prev_dn = dn_list[-2] if len(dn_list) > 1 else last_dn
-    
-    return (last_trend, prev_trend, last_up, last_dn, prev_dn)
+    return {
+        'up_list': up_list,
+        'dn_list': dn_list,
+        'trend_list': trend_list
+    }
 
 # ==== Binance ====
 def get_usdt_pairs():
@@ -184,60 +190,128 @@ def get_usdt_pairs():
         print(f"✗ Exchange info error: {e}")
         return []
 
-# ==== STAGE 1: BREAKOUT DETECTION (30 candles) ====
-def detect_breakout(symbol):
+# ==== STAGE 1: RETEST DETECTION (50 candles) ====
+def detect_retest(symbol):
     """
-    Stage 1: Detect breakout with 30 candles (minimum for supertrend calculation).
-    Returns: basic_data if breakout detected, None otherwise
+    Stage 1: Detect retest of support in EXISTING uptrend.
+    Logic:
+    1. Current trend must be green (1) - في اتجاه صاعد
+    2. Must have been in uptrend for at least MIN_CANDLES_AFTER_BREAKOUT candles - الاتجاه مو جديد
+    3. Current price must be within RETEST_PROXIMITY% of green support line - قريب من الدعم
+    4. Price must have been SIGNIFICANTLY higher before (away from support) - كان بعيد ورجع
+    5. Price is coming DOWN to retest (not just sitting on support) - راجع يختبر مو واقف
+    Returns: basic_data if retest detected, None otherwise
     """
     try:
-        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=15m&limit=30"
+        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
         candles = session.get(url, timeout=5).json()
         
-        if not candles or isinstance(candles, dict) or len(candles) < 20:
+        if not candles or isinstance(candles, dict) or len(candles) < 30:
             return None
         
         # Get last closed candle
         last_idx = len(candles) - 2
         last_candle = candles[last_idx]
-        prev_candle = candles[last_idx - 1]
         
         candle_time = datetime.fromtimestamp(last_candle[0]/1000, tz=timezone.utc)
         time_str = candle_time.strftime("%Y-%m-%d %H:%M")
         
-        prev_close = float(prev_candle[4])
-        open_p = float(last_candle[1])
         close = float(last_candle[4])
-        pct = ((close - prev_close) / prev_close) * 100
+        low = float(last_candle[3])
         
-        # Calculate supertrend for breakout detection
+        # Calculate supertrend for all candles
         st_result = calculate_supertrend(candles[:last_idx+1])
         if not st_result:
             return None
         
-        last_trend, prev_trend, last_up, last_dn, prev_dn = st_result
+        trend_list = st_result['trend_list']
+        up_list = st_result['up_list']
         
-        # Check for breakout (trend reversal from red to green)
-        if prev_trend == -1 and last_trend == 1:
-            old_red_line = prev_dn
-            red_distance = ((close - old_red_line) / old_red_line) * 100
-            new_green_line = last_up
-            green_distance = ((close - new_green_line) / new_green_line) * 100
+        # 1. Current must be in uptrend (green)
+        if trend_list[-1] != 1:
+            return None
+        
+        # 2. Count how many consecutive green candles (uptrend duration)
+        uptrend_candles = 0
+        for i in range(len(trend_list) - 1, -1, -1):
+            if trend_list[i] == 1:
+                uptrend_candles += 1
+            else:
+                break
+        
+        # Must be in uptrend for at least MIN_CANDLES_AFTER_BREAKOUT
+        if uptrend_candles < MIN_CANDLES_AFTER_BREAKOUT:
+            return None
+        
+        # 3. Get current support line (green line)
+        current_support = up_list[-1]
+        
+        # 4. Check if price is retesting support (within RETEST_PROXIMITY%)
+        distance_from_support = ((close - current_support) / current_support) * 100
+        
+        # Price should be close to support (within RETEST_PROXIMITY%)
+        # But NOT below it (price < support means broke down)
+        if distance_from_support < 0 or distance_from_support > RETEST_PROXIMITY:
+            return None
+        
+        # 5. Check if price was SIGNIFICANTLY higher before (to confirm pullback)
+        # Look at last 3-8 candles to find the highest point
+        highest_distance = 0
+        highest_idx = -1
+        check_range = min(8, len(candles) - 12)  # Look back 3-8 candles
+        
+        for i in range(last_idx - check_range, last_idx):
+            if i < 11:  # Skip early candles (before supertrend stabilizes)
+                continue
+            check_close = float(candles[i][4])
+            check_support = up_list[i - 11]  # Adjust for atr_period offset
+            check_distance = ((check_close - check_support) / check_support) * 100
             
-            return {
-                'symbol': symbol,
-                'time_str': time_str,
-                'pct': pct,
-                'close': close,
-                'old_red_line': old_red_line,
-                'red_distance': red_distance,
-                'new_green_line': new_green_line,
-                'green_distance': green_distance
-            }
+            if check_distance > highest_distance:
+                highest_distance = check_distance
+                highest_idx = i
         
-        return None
+        # Must have been at least 3% away from support (meaningful pullback)
+        if highest_distance < 3.0:
+            return None
         
-    except:
+        # 6. Confirm price is coming DOWN (not going up away from support)
+        # Compare current distance with previous 2 candles
+        recent_distances = []
+        for i in range(max(0, last_idx - 2), last_idx + 1):
+            if i < 11:
+                continue
+            c = float(candles[i][4])
+            s = up_list[i - 11]
+            d = ((c - s) / s) * 100
+            recent_distances.append(d)
+        
+        # Price should be getting closer to support (distances decreasing)
+        if len(recent_distances) >= 2 and recent_distances[-1] > recent_distances[0]:
+            return None  # Price moving away from support, not retesting
+        
+        # Calculate % change from previous candle
+        prev_close = float(candles[last_idx - 1][4])
+        pct = ((close - prev_close) / prev_close) * 100
+        
+        # Calculate when the uptrend started
+        uptrend_start_idx = len(trend_list) - uptrend_candles
+        uptrend_start_candle_idx = uptrend_start_idx + 10  # Adjust for atr_period
+        uptrend_start_time = datetime.fromtimestamp(candles[uptrend_start_candle_idx][0]/1000, tz=timezone.utc)
+        
+        return {
+            'symbol': symbol,
+            'time_str': time_str,
+            'pct': pct,
+            'close': close,
+            'support_line': current_support,
+            'distance_from_support': distance_from_support,
+            'uptrend_candles': uptrend_candles,
+            'highest_distance': highest_distance,
+            'uptrend_start_time': uptrend_start_time.strftime("%Y-%m-%d %H:%M")
+        }
+        
+    except Exception as e:
         return None
 
 # ==== STAGE 2: CALCULATE RSI & VM (25 candles) ====
@@ -246,7 +320,7 @@ def calculate_rsi_and_vm(symbol):
     Stage 2: Fetch 25 candles to calculate RSI and Volume Multiplier.
     """
     try:
-        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=15m&limit=25"
+        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=25"
         candles = session.get(url, timeout=5).json()
         
         if not candles or isinstance(candles, dict) or len(candles) < 20:
@@ -279,102 +353,107 @@ def calculate_rsi_and_vm(symbol):
 def scan_all_symbols(symbols):
     """
     Two-stage scanning:
-    Stage 1: Detect breakouts with 30 candles
-    Stage 2: Calculate RSI and VM with 25 candles for detected breakouts
+    Stage 1: Detect retests with 50 candles
+    Stage 2: Calculate RSI and VM with 25 candles for detected retests
     """
-    breakout_candidates = []
+    retest_candidates = []
     
-    print(f"🔍 Stage 1: Detecting breakouts with 30 candles...")
+    print(f"🔍 Stage 1: Detecting retests with 50 candles...")
     stage1_start = time.time()
     
-    # Stage 1: Detect breakouts
+    # Stage 1: Detect retests
     with ThreadPoolExecutor(max_workers=150) as ex:
-        futures = {ex.submit(detect_breakout, s): s for s in symbols}
+        futures = {ex.submit(detect_retest, s): s for s in symbols}
         
         for f in as_completed(futures):
             data = f.result()
             if data:
-                breakout_candidates.append(data)
+                retest_candidates.append(data)
     
     stage1_duration = time.time() - stage1_start
     print(f"✓ Stage 1 completed in {stage1_duration:.2f}s")
-    print(f"  Found: {len(breakout_candidates)} breakouts")
+    print(f"  Found: {len(retest_candidates)} retests")
     
-    # Stage 2: Calculate RSI and VM for detected breakouts
-    breakouts_final = []
+    # Stage 2: Calculate RSI and VM for detected retests
+    retests_final = []
     
-    if breakout_candidates:
-        print(f"\n🔬 Stage 2: Calculating RSI & VM for {len(breakout_candidates)} coins (25 candles)...")
+    if retest_candidates:
+        print(f"\n🔬 Stage 2: Calculating RSI & VM for {len(retest_candidates)} coins (25 candles)...")
         stage2_start = time.time()
         
         with ThreadPoolExecutor(max_workers=50) as ex:
-            futures = {ex.submit(calculate_rsi_and_vm, d['symbol']): d for d in breakout_candidates}
+            futures = {ex.submit(calculate_rsi_and_vm, d['symbol']): d for d in retest_candidates}
             
             for f in as_completed(futures):
                 rsi, vm, vol_usdt = f.result()
                 data = futures[f]
                 
                 if rsi is not None and vm is not None:
-                    breakouts_final.append((
+                    retests_final.append((
                         data['symbol'],
                         data['pct'],
                         data['close'],
                         vol_usdt,
                         vm,
                         rsi,
-                        data['old_red_line'],
-                        data['red_distance'],
-                        data['new_green_line'],
-                        data['green_distance'],
+                        data['support_line'],
+                        data['distance_from_support'],
+                        data['uptrend_candles'],
+                        data['highest_distance'],
+                        data['uptrend_start_time'],
                         data['time_str']
                     ))
         
         stage2_duration = time.time() - stage2_start
         print(f"✓ Stage 2 completed in {stage2_duration:.2f}s")
     
-    return breakouts_final
+    return retests_final
 
 # ==== REPORTING ====
-def format_breakout_report(breakouts, duration):
-    if not breakouts:
+def format_retest_report(retests, duration):
+    if not retests:
         return None
     
     grouped = defaultdict(list)
-    for b in breakouts:
-        grouped[b[10]].append(b)
+    for r in retests:
+        grouped[r[11]].append(r)
     
-    report = f"🚀 <b>TREND BREAKOUT ALERTS (15m)</b> 🚀\n"
-    report += f"⏱ Scan: {duration:.2f}s | Found: {len(breakouts)}\n\n"
+    report = f"🎯 <b>SUPPORT RETEST ALERTS (1H)</b> 🎯\n"
+    report += f"⏱ Scan: {duration:.2f}s | Found: {len(retests)}\n\n"
     
     for h in sorted(grouped, reverse=True):
-        items = sorted(grouped[h], key=lambda x: x[7], reverse=True)
+        items = sorted(grouped[h], key=lambda x: x[7])  # Sort by distance (closest first)
         report += f"⏰ {h} UTC\n"
         
-        for symbol, pct, close, vol_usdt, vm, rsi, old_red_line, red_distance, new_green_line, green_distance, time_str in items:
+        for symbol, pct, close, vol_usdt, vm, rsi, support_line, distance, uptrend_candles, highest_distance, uptrend_start_time, time_str in items:
             sym = symbol.replace("USDT","")
             rsi_str = f"{rsi:.1f}" if rsi else "N/A"
+            vol_str = format_volume(vol_usdt)
             
-            line1 = f"{sym:6s} {pct:5.2f}% {rsi_str:>4s} {vm:4.1f}x {format_volume(vol_usdt):4s}M"
-            line2 = f"       🔴Old: ${old_red_line:.5f} (+{red_distance:.2f}%)"
-            line3 = f"       🟢New: ${new_green_line:.5f} (+{green_distance:.2f}%)"
+            line1 = f"{sym:8s}{pct:5.2f}% {rsi_str} {vm:.1f}x {vol_str}"
+            line2 = f"          🟢Support: ${support_line:.5f} (+{distance:.2f}%)"
+            line3 = f"          📈Uptrend: {uptrend_candles}h | Peak: +{highest_distance:.1f}%"
             
             report += f"<code>{line1}</code>\n"
-            report += f"   <code>{line2}</code>\n"
-            report += f"   <code>{line3}</code>\n"
+            report += f"<code>{line2}</code>\n"
+            report += f"<code>{line3}</code>\n"
         report += "\n"
     
-    report += "💡 🔴Old = Last downtrend (broke above!)\n"
-    report += "💡 🟢New = New uptrend (support)\n"
+    report += "💡 Coin in uptrend & retesting support!\n"
+    report += "💡 Closer to support = stronger signal\n"
+    report += "💡 Higher peak = stronger pullback confirmation\n"
     
     return report
 
 # ==== Main ====
 def main():
     print("="*80)
-    print("🚀 BREAKOUT SCANNER - TWO-STAGE ANALYSIS (15-MINUTE TIMEFRAME)")
+    print("🎯 RETEST SCANNER - TWO-STAGE ANALYSIS (1-HOUR TIMEFRAME)")
     print("="*80)
-    print(f"⚡ Stage 1: Detect breakouts with 30 candles (ALL symbols)")
-    print(f"🔬 Stage 2: Calculate RSI & VM with 25 candles (DETECTED breakouts only)")
+    print(f"⚡ Stage 1: Detect retests in EXISTING uptrends (50 candles)")
+    print(f"🔬 Stage 2: Calculate RSI & VM (25 candles)")
+    print(f"📏 Retest: within {RETEST_PROXIMITY}% of support")
+    print(f"📈 Min uptrend: {MIN_CANDLES_AFTER_BREAKOUT} hours")
     print("="*80)
     
     symbols = get_usdt_pairs()
@@ -392,36 +471,35 @@ def main():
         
         # === TWO-STAGE SCAN ===
         total_start = time.time()
-        breakouts = scan_all_symbols(symbols)
+        retests = scan_all_symbols(symbols)
         total_duration = time.time() - total_start
         
         print(f"\n✓ Complete scan finished in {total_duration:.2f}s")
         
         # === FILTER NEW ALERTS ===
-        fresh_breakouts = [b for b in breakouts if (b[0], b[10]) not in reported_breakouts]
+        fresh_retests = [r for r in retests if (r[0], r[11]) not in reported_retests]
         
-        for b in fresh_breakouts:
-            reported_breakouts.add((b[0], b[10]))
+        for r in fresh_retests:
+            reported_retests.add((r[0], r[11]))
         
-        print(f"  New alerts: {len(fresh_breakouts)} breakouts")
+        print(f"  New alerts: {len(fresh_retests)} retests")
         
         # === SEND ALERTS ===
-        if fresh_breakouts:
-            msg = format_breakout_report(fresh_breakouts, total_duration)
+        if fresh_retests:
+            msg = format_retest_report(fresh_retests, total_duration)
             if msg:
-                print("\n📤 Sending BREAKOUT alert...")
+                print("\n📤 Sending RETEST alert...")
                 print("\n" + "="*80)
                 print(msg.replace("<b>", "").replace("</b>", "").replace("<code>", "").replace("</code>", ""))
                 print("="*80)
                 send_telegram(msg[:4096])
         
-        # === WAIT FOR NEXT 15-MINUTE INTERVAL ===
+        # === WAIT FOR NEXT HOUR ===
         server_time = get_binance_server_time()
-        # Calculate next 15-minute mark (0, 15, 30, 45 of each hour)
-        next_interval = (server_time // 900 + 1) * 900  # 900 seconds = 15 minutes
-        sleep_time = max(30, next_interval - server_time + 5)
+        next_hour = (server_time // 3600 + 1) * 3600
+        sleep_time = max(60, next_hour - server_time + 5)
         
-        print(f"\n😴 Sleeping {sleep_time:.0f}s until next 15-minute interval...\n")
+        print(f"\n😴 Sleeping {sleep_time:.0f}s until next hour...\n")
         time.sleep(sleep_time)
 
 if __name__ == "__main__":
