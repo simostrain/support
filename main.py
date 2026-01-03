@@ -305,29 +305,28 @@ def format_compact_retest_report(retests, duration):
 
     lines = []
     lines.append(f"🎯 RETESTS (1H) | Found: {len(retests)} | Scan: {duration:.1f}s")
-    lines.append("SYM     %CHG  RSI VMx   VOL  DIST  PEAK")
-    lines.append("-" * 48)
 
     for h in sorted(grouped, reverse=True):
-        for item in grouped[h]:
+        # Sort by distance (closest first) — optional but useful
+        sorted_items = sorted(grouped[h], key=lambda x: x[7])  # x[7] = distance
+        for item in sorted_items:
             symbol, pct, close, vol_usdt, vm, rsi, support_line, distance, uptrend_candles, highest_distance, uptrend_start_time, time_str = item
             sym = symbol.replace("USDT", "")[:6]
 
-            sym_f = f"{sym:>6s}"
-            pct_f = f"{pct:6.2f}"
-            rsi_f = f"{rsi:5.1f}"
-            vm_f = f"{vm:4.1f}x"
-            vol_f = f"{format_volume(vol_usdt):>5s}"
-            dist_f = f"{distance:5.2f}"
-            peak_f = f"{highest_distance:5.1f}"
-
-            line = f"{sym_f} {pct_f} {rsi_f} {vm_f} {vol_f} {dist_f} {peak_f}"
+            # Format exactly as you showed: tight spacing, no extra zeros
+            line = (
+                f"{sym:>6s} "
+                f"{pct:5.2f} "
+                f"{rsi:4.1f} "
+                f"{vm:4.1f}x "
+                f"{format_volume(vol_usdt):>4s} "
+                f"{distance:4.2f} "
+                f"{highest_distance:4.1f}"
+            )
             lines.append(line)
-        lines.append("")
 
-    lines.append("💡 Lower DIST = closer to support (better signal)")
+    lines.append("💡 Lower DIST = better signal")
     return "\n".join(lines)
-
 # ==== Main ====
 def main():
     print("="*80)
