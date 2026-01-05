@@ -286,14 +286,14 @@ def get_strength_emoji(score):
     else:
         return "⚪"  # Weak
 
-# ==== STAGE 1: BREAKOUT DETECTION (500 candles) ====
+# ==== STAGE 1: BREAKOUT DETECTION (100 candles) ====
 def detect_breakout(symbol):
     """
-    Stage 1: Detect breakout with 500 candles.
+    Stage 1: Detect breakout with 100 candles.
     Returns: basic_data if breakout detected, None otherwise
     """
     try:
-        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=500"
+        url = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=100"
         candles = session.get(url, timeout=5).json()
         
         if not candles or isinstance(candles, dict) or len(candles) < 20:
