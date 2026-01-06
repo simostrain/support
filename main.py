@@ -225,7 +225,7 @@ def calculate_strength_score_indicator(volume, vol_sma, close, supertrend, atr):
     # Cap at 10 (matching indicator)
     strength_score = min(strength_score, 10.0)
     
-    return round(strength_score, 2)
+    return strength_score  # Return full precision, not rounded
 
 def get_strength_emoji(score):
     """Return emoji based on indicator strength score (0-10)"""
@@ -520,14 +520,13 @@ def format_signal_report(signals, duration):
                 sym = b['symbol'].replace("USDT", "")
                 rsi_str = f"{b['rsi']:.1f}"
                 csince_str = f"{b['csince']:03d}"
-                strength_icon = get_strength_emoji(b['indicator_strength'])
-                ind_str = f"{b['indicator_strength']:.1f}"
+                ind_str = f"{b['indicator_strength']:.2f}"
                 
                 line1 = f"{sym:6s} {b['pct']:5.2f} {rsi_str:>4s} {b['vm']:4.1f} {format_volume(b['vol_usdt']):4s} {csince_str} S:{ind_str}"
                 line2 = f"       🔴Old: ${b['old_red_line']:.5f} (+{b['red_distance']:.2f}%)"
                 line3 = f"       🟢New: ${b['new_green_line']:.5f} (+{b['green_distance']:.2f}%)"
                 
-                report += f"{strength_icon} <code>{line1}</code>\n"
+                report += f"<code>{line1}</code>\n"
                 report += f"   <code>{line2}</code>\n"
                 report += f"   <code>{line3}</code>\n"
         
@@ -539,13 +538,13 @@ def format_signal_report(signals, duration):
             for r in items:
                 sym = r['symbol'].replace("USDT", "")
                 rsi_str = f"{r['rsi']:.1f}"
-                ind_str = f"{r['indicator_strength']:.1f}"
+                ind_str = f"{r['indicator_strength']:.2f}"
                 bars_str = f"{r['bars_in_trend']:02d}"
                 
                 line1 = f"{sym:6s} {r['pct']:5.2f} {rsi_str:>4s} {r['vm']:4.1f} {format_volume(r['vol_usdt']):4s} B:{bars_str} S:{ind_str}"
                 line2 = f"       🟢ST: ${r['supertrend']:.5f} (+{r['support_distance']:.2f}%)"
                 
-                report += f"🔵 <code>{line1}</code>\n"
+                report += f"<code>{line1}</code>\n"
                 report += f"   <code>{line2}</code>\n"
         
         report += "\n"
@@ -553,11 +552,7 @@ def format_signal_report(signals, duration):
     report += "💡 <b>Legend:</b>\n"
     report += "B = Breakout (🟢) | R = Retest (🔵)\n"
     report += "S = Indicator Strength (0-10)\n"
-    report += "B:XX = Bars since trend start\n\n"
-    report += "💡 <b>Strength Guide:</b>\n"
-    report += "🔥 8.5+ = Exceptional | ⭐ 7.5+ = Excellent\n"
-    report += "✅ 6.5+ = Strong | 🟢 5.5+ = Good\n"
-    report += "🟡 4.5+ = Moderate | ⚪ &lt;4.5 = Weak\n"
+    report += "B:XX = Bars since trend start\n"
     
     return report
 
