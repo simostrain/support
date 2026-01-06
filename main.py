@@ -1,6 +1,7 @@
 import os
 import requests
 import time
+import math
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
@@ -217,10 +218,12 @@ def calculate_strength_score_indicator(volume, vol_sma, close, supertrend, atr):
     
     vol_ratio = volume / vol_sma
     momentum = abs(close - supertrend) / atr
-    strength_score = (vol_ratio ** 0.5) * momentum  # Using sqrt instead of log for better scaling
     
-    # Scale to 0-10 range (matching indicator)
-    strength_score = min(strength_score * 10, 10.0)
+    # Exact formula from indicator
+    strength_score = math.log(vol_ratio + 1) * momentum
+    
+    # Cap at 10 (matching indicator)
+    strength_score = min(strength_score, 10.0)
     
     return round(strength_score, 2)
 
@@ -266,8 +269,8 @@ def detect_signals(symbol):
         high = float(last_candle[2])
         low = float(last_candle[3])
         close = float(last_candle[4])
-        volume = float(last_candle[5])
-        vol_usdt = open_p * volume
+        volume = float(last_candle[5])  # Base volume (e.g., BTC, not USDT)
+        vol_usdt = open_p * volume      # USDT volume (for display only)
         
         pct = ((close - prev_close) / prev_close) * 100
         
@@ -286,14 +289,14 @@ def detect_signals(symbol):
         # Calculate ATR for current candle
         atr = calculate_atr(candles[:last_idx+1], 10)
         
-        # Calculate volume SMA
+        # Calculate volume SMA (using BASE volume, not USDT)
         vol_ma_start = max(0, last_idx - VOL_LEN + 1)
-        vol_ma_data = [float(candles[j][1]) * float(candles[j][5]) for j in range(vol_ma_start, last_idx + 1)]
-        vol_sma = sum(vol_ma_data) / len(vol_ma_data) if vol_ma_data else vol_usdt
+        vol_ma_data = [float(candles[j][5]) for j in range(vol_ma_start, last_idx + 1)]
+        vol_sma = sum(vol_ma_data) / len(vol_ma_data) if vol_ma_data else volume
         
-        # Calculate indicator strength score
+        # Calculate indicator strength score (using BASE volume)
         current_supertrend = last_up if last_trend == 1 else last_dn
-        indicator_strength = calculate_strength_score_indicator(vol_usdt, vol_sma, close, current_supertrend, atr)
+        indicator_strength = calculate_strength_score_indicator(volume, vol_sma, close, current_supertrend, atr)
         
         results = {}
         
@@ -325,8 +328,8 @@ def detect_signals(symbol):
                         csince = look_back
                         break
             
-            # Volume confirmation
-            vol_confirmed = vol_usdt > (vol_sma * VOL_MULT_RETEST)
+            # Volume confirmation (using base volume)
+            vol_confirmed = volume > (vol_sma * VOL_MULT_RETEST)
             
             if vol_confirmed:
                 results['breakout'] = {
@@ -365,8 +368,8 @@ def detect_signals(symbol):
                 bullish_candle = close > open_p  # green candle
                 
                 if support_tested and support_held and bullish_candle and valid_timing:
-                    # Volume confirmation
-                    vol_confirmed = vol_usdt > (vol_sma * VOL_MULT_RETEST)
+                    # Volume confirmation (using base volume)
+                    vol_confirmed = volume > (vol_sma * VOL_MULT_RETEST)
                     
                     if vol_confirmed:
                         results['retest'] = {
