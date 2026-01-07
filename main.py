@@ -551,7 +551,7 @@ def format_signal_report(signals, duration):
                 csince_str = f"{b['csince']:03d}"
                 ind_str = f"{b['indicator_strength']:.2f}"
                 
-                line1 = f"{sym:6s} {b['pct']:5.2f}% RSI:{rsi_str:>4s} VM:{b['vm']:4.1f}x Vol:{format_volume(b['vol_usdt']):4s}M C:{csince_str} S:{ind_str}"
+                line1 = f"{sym:6s} {b['pct']:5.2f}% {rsi_str:>4s} {b['vm']:4.1f}x {format_volume(b['vol_usdt']):4s}M {csince_str} {ind_str}"
                 line2 = f"       🔴Old: ${b['old_red_line']:.5f} (+{b['red_distance']:.2f}%)"
                 line3 = f"       🟢New: ${b['new_green_line']:.5f} (+{b['green_distance']:.2f}%)"
                 
@@ -570,7 +570,7 @@ def format_signal_report(signals, duration):
                 ind_str = f"{r['indicator_strength']:.2f}"
                 bars_str = f"{r['bars_in_trend']:02d}"
                 
-                line1 = f"{sym:6s} {r['pct']:5.2f}% RSI:{rsi_str:>4s} VM:{r['vm']:4.1f}x Vol:{format_volume(r['vol_usdt']):4s}M B:{bars_str} S:{ind_str}"
+                line1 = f"{sym:6s} {r['pct']:5.2f}% {rsi_str:>4s} {r['vm']:4.1f}x {format_volume(r['vol_usdt']):4s}M {bars_str} {ind_str}"
                 line2 = f"       🟢ST: ${r['supertrend']:.5f} (+{r['support_distance']:.2f}%)"
                 
                 report += f"<code>{line1}</code>\n"
@@ -579,9 +579,10 @@ def format_signal_report(signals, duration):
         report += "\n"
     
     report += "💡 <b>Legend:</b>\n"
+    report += "Format: SYMBOL %CHG RSI VMx VolM CSINCE/BARS STRENGTH\n"
     report += "B = Breakout (🟢) | R = Retest (🔵)\n"
-    report += "S = Indicator Strength (0-10) | VM = Volume Multiplier\n"
-    report += "C = Candles since last breakout | B:XX = Bars since trend start\n"
+    report += "Strength = Indicator Score (0-10) | VM = Volume Multiplier\n"
+    report += "CSINCE = Candles since last breakout | BARS = Bars since trend start\n"
     
     return report
 
