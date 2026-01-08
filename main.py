@@ -46,7 +46,7 @@ CUSTOM_TICKERS = [
     "SYS","TAO","TFUEL","Theta","TIA","TNSR","TON","TOWNS","TRB","TRX","TWT","Uma","UTK","Vana","VANRY",
     "VET","VIC","VIRTUAL","VTHO","WAXP","WCT","win","WLD","Xai","XEC","XLM","XNO","XRP","XTZ","XVG","Zec",
     "ZEN","ZIL","ZK","ZRO","0G","2Z","C","D","ENSO","G","HOLO","KITE","LINEA","MIRA","OPEN","S","SAPIEN",
-    "SOMI","W","WAL","XPL","ZBT","ZKC"
+    "SOMI","W","WAL","XPL","ZBT","ZKC","BREV","ZKP"
 ]
 
 # Log file path (use /tmp for Railway or adjust for your environment)
