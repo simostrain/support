@@ -4,7 +4,6 @@ import time
 import json
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
 from pathlib import Path
 
 # ==== Settings ====
@@ -13,9 +12,10 @@ BINANCE_API = "https://api.binance.com"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Your exact conditions
-MAX_CANDLE_MOVE_1H = 1.0      # ±1% per 1h candle
-VOL_MULT_THRESHOLD = 1.5      # Volume ≥ 1.5x average
+# Your exact thresholds
+MAX_CANDLE_MOVE_1H = 1.0      # ±1% per 1h candle (for both conditions)
+VOL_MULT_THRESHOLD = 1.5      # for accumulation
+MIN_MOMENTUM_PCT = 0.8        # for momentum kick
 
 CUSTOM_TICKERS = [
     "At","A2Z","ACE","ACH","ACT","ADA","ADX","AGLD","AIXBT","Algo","ALICE","ALPINE","ALT","AMP","ANKR","APE",
@@ -57,7 +57,7 @@ def log_signal_to_file(signal_data):
     try:
         with open(LOG_FILE, 'a') as f:
             f.write(json.dumps(log_entry) + '\n')
-    except Exception as e:
+    except Exception:
         pass
 
 def send_telegram(msg, max_retries=3):
@@ -80,7 +80,7 @@ def send_telegram(msg, max_retries=3):
     return False
 
 def is_price_stable_6h(candles_1h):
-    """Last 6 hourly candles: each within ±1%"""
+    """Check if last 6 hourly candles each moved within ±1%"""
     if len(candles_1h) < 6:
         return False
     for i in range(-6, 0):
@@ -95,7 +95,7 @@ def is_price_stable_6h(candles_1h):
     return True
 
 def has_volume_spike_15m(candles_15m):
-    """Current 15m volume ≥1.5x avg, and last 3 candles ≥1.5x avg"""
+    """Check volume spike: current ≥1.5x avg, last 3 ≥1.5x avg"""
     if len(candles_15m) < 12:
         return False
     volumes = [float(c[5]) for c in candles_15m]
@@ -111,44 +111,53 @@ def has_volume_spike_15m(candles_15m):
             return False
     return True
 
-def detect_accumulation(symbol):
+def detect_opportunity(symbol):
     try:
-        # Get 1h candles
-        url_1h = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=12"
-        candles_1h = session.get(url_1h, timeout=5).json()
-        if not candles_1h or len(candles_1h) < 6:
+        # Fetch data
+        candles_1h = session.get(f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=12", timeout=5).json()
+        candles_15m = session.get(f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=15m&limit=20", timeout=5).json()
+        
+        if not candles_1h or len(candles_1h) < 6 or not candles_15m or len(candles_15m) < 12:
             return None
 
-        # Get 15m candles
-        url_15m = f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=15m&limit=20"
-        candles_15m = session.get(url_15m, timeout=5).json()
-        if not candles_15m or len(candles_15m) < 12:
+        # Check price stability first (required for both conditions)
+        if not is_price_stable_6h(candles_1h):
             return None
 
-        stable_price = is_price_stable_6h(candles_1h)
-        strong_volume = has_volume_spike_15m(candles_15m)
+        current_15m = candles_15m[-2]  # last fully closed candle
+        open_15m = float(current_15m[1])
+        close_15m = float(current_15m[4])
+        pct_15m = ((close_15m - open_15m) / open_15m) * 100
 
-        if stable_price and strong_volume:
-            current_price = float(candles_15m[-2][4])
+        signal_type = None
+        details = {}
+
+        # 🔸 Condition B: Momentum Kick (≥0.8% move)
+        if pct_15m >= MIN_MOMENTUM_PCT:
+            signal_type = "momentum"
+            details = {'pct_15m': pct_15m}
+
+        # 🔹 Condition A: Accumulation (volume spike)
+        elif has_volume_spike_15m(candles_15m):
+            signal_type = "accumulation"
             avg_vol_8 = sum(float(c[5]) for c in candles_15m[-12:-4]) / 8
             current_vol = float(candles_15m[-2][5])
             vol_ratio = current_vol / avg_vol_8 if avg_vol_8 > 0 else 0
-
-            # Calculate max 1h move in last 6h for info
+            # Calculate max 1h move in last 6h
             max_move = 0
             for i in range(-6, 0):
                 c = candles_1h[i]
-                open_p = float(c[1])
-                close = float(c[4])
-                move = abs((close - open_p) / open_p) * 100
-                if move > max_move:
-                    max_move = move
+                o = float(c[1]); cl = float(c[4])
+                move = abs((cl - o) / o) * 100
+                if move > max_move: max_move = move
+            details = {'vol_ratio': vol_ratio, 'max_1h_move_6h': max_move}
 
+        if signal_type:
             return {
                 'symbol': symbol,
-                'price': current_price,
-                'vol_ratio': vol_ratio,
-                'max_1h_move_6h': max_move
+                'price': close_15m,
+                'type': signal_type,
+                'details': details
             }
 
     except Exception:
@@ -157,7 +166,7 @@ def detect_accumulation(symbol):
 def scan_all_symbols(symbols):
     candidates = []
     with ThreadPoolExecutor(max_workers=80) as ex:
-        futures = {ex.submit(detect_accumulation, s): s for s in symbols}
+        futures = {ex.submit(detect_opportunity, s): s for s in symbols}
         for f in as_completed(futures):
             result = f.result()
             if result:
@@ -167,35 +176,43 @@ def scan_all_symbols(symbols):
 def format_alert(signal):
     sym = signal['symbol'].replace("USDT", "")
     price = signal['price']
-    vol_ratio = signal['vol_ratio']
-    max_move = signal['max_1h_move_6h']
+    
+    if signal['type'] == "momentum":
+        pct = signal['details']['pct_15m']
+        msg = f"🚀 <b>MOMENTUM KICK</b> 🚀\n"
+        msg += f"Symbol: <b>{sym}</b>\n"
+        msg += f"Price: ${price:.5f}\n"
+        msg += f"15m Move: +{pct:.2f}%\n\n"
+        msg += f"🔥 Early move after quiet period!"
+    else:  # accumulation
+        vol_ratio = signal['details']['vol_ratio']
+        max_move = signal['details']['max_1h_move_6h']
+        msg = f"🔍 <b>ACCUMULATION ALERT</b> 🔍\n"
+        msg += f"Symbol: <b>{sym}</b>\n"
+        msg += f"Price: ${price:.5f}\n"
+        msg += f"15m Vol: {vol_ratio:.1f}x average\n"
+        msg += f"Max 1h move (last 6h): ±{max_move:.2f}%\n\n"
+        msg += f"⚠️ Strong volume after quiet period!"
 
-    msg = f"🔍 <b>ACCUMULATION ALERT</b> 🔍\n"
-    msg += f"Symbol: <b>{sym}</b>\n"
-    msg += f"Price: ${price:.5f}\n"
-    msg += f"15m Vol: {vol_ratio:.1f}x average\n"
-    msg += f"Max 1h move (last 6h): ±{max_move:.2f}%\n\n"
-    msg += f"⚠️ <b>Watch closely — breakout likely!</b>"
     return msg
 
 def get_usdt_pairs():
     candidates = list(dict.fromkeys([t.upper() + "USDT" for t in CUSTOM_TICKERS]))
     try:
         data = session.get(f"{BINANCE_API}/api/v3/exchangeInfo", timeout=10).json()
-        valid = {s["symbol"] for s in data["symbols"]
-                 if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"}
-        pairs = [c for c in candidates if c in valid]
-        return pairs
+        valid = {s["symbol"] for s in data["symbols"] if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"}
+        return [c for c in candidates if c in valid]
     except:
         return []
 
 def main():
     print("="*60)
-    print("🚀 ACCUMULATION SCANNER (YOUR EXACT RULES)")
+    print("🎯 FINAL ACCUMULATION + MOMENTUM SCANNER")
     print("="*60)
-    print(f"📊 Conditions:")
+    print(f"📊 BOTH CONDITIONS REQUIRE:")
     print(f"   • Last 6h: each 1h candle ∈ [−1%, +1%]")
-    print(f"   • 15m volume ≥ 1.5x avg (last 3 candles too)")
+    print(f"🔹 Accumulation: Volume ≥1.5x (last 3 candles too)")
+    print(f"🔸 Momentum: 15m move ≥ +0.8%")
     print("="*60)
 
     symbols = get_usdt_pairs()
@@ -206,33 +223,24 @@ def main():
     print(f"✓ Monitoring {len(symbols)} pairs\n")
 
     while True:
-        now = datetime.now(timezone.utc)
-        print(f"\n🕐 Scan started: {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-
         signals = scan_all_symbols(symbols)
         fresh_signals = []
 
         for sig in signals:
-            key = (sig['symbol'], round(sig['price'], 4))
+            key = (sig['symbol'], sig['type'], round(sig['price'], 4))
             if key not in reported_signals:
                 reported_signals.add(key)
                 fresh_signals.append(sig)
                 log_signal_to_file(sig)
 
         if fresh_signals:
-            print(f"\n🆕 Found {len(fresh_signals)} accumulation signal(s):")
             for sig in fresh_signals:
-                sym = sig['symbol'].replace("USDT", "")
-                print(f"   • {sym} @ ${sig['price']:.5f} (Vol: {sig['vol_ratio']:.1f}x)")
                 msg = format_alert(sig)
                 send_telegram(msg)
-        else:
-            print("  ℹ️ No accumulation patterns detected")
 
         server_time = get_binance_server_time()
         next_interval = (server_time // 900 + 1) * 900
-        sleep_time = max(30, next_interval - server_time + 2)
-        time.sleep(sleep_time)
+        time.sleep(max(30, next_interval - server_time + 2))
 
 if __name__ == "__main__":
     main()
