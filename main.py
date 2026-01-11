@@ -12,10 +12,9 @@ BINANCE_API = "https://api.binance.com"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Your exact thresholds
-MAX_CANDLE_MOVE_1H = 1.0      # ±1% per 1h candle (for both conditions)
-VOL_MULT_THRESHOLD = 1.5      # for accumulation
-MIN_MOMENTUM_PCT = 1        # for momentum kick
+MAX_CANDLE_MOVE_1H = 1.0      # ±1% per 1h candle
+VOL_MULT_THRESHOLD = 1.5      # volume multiplier
+MIN_MOMENTUM_PCT = 1        # min 15m move for momentum
 
 CUSTOM_TICKERS = [
     "At","A2Z","ACE","ACH","ACT","ADA","ADX","AGLD","AIXBT","Algo","ALICE","ALPINE","ALT","AMP","ANKR","APE",
@@ -36,8 +35,9 @@ CUSTOM_TICKERS = [
     "SOMI","W","WAL","XPL","ZBT","ZKC","BREV","ZKP"
 ]
 
-LOG_FILE = Path("/tmp/accumulation_log.json")
+LOG_FILE = Path("/tmp/two_stage_log.json")
 reported_signals = set()
+stable_coins_cache = []
 
 session = requests.Session()
 adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100, max_retries=2)
@@ -80,7 +80,6 @@ def send_telegram(msg, max_retries=3):
     return False
 
 def is_price_stable_6h(candles_1h):
-    """Check if last 6 hourly candles each moved within ±1%"""
     if len(candles_1h) < 6:
         return False
     for i in range(-6, 0):
@@ -94,102 +93,122 @@ def is_price_stable_6h(candles_1h):
             return False
     return True
 
-def has_volume_spike_15m(candles_15m):
-    """Check volume spike: current ≥1.5x avg, last 3 ≥1.5x avg"""
-    if len(candles_15m) < 12:
-        return False
-    volumes = [float(c[5]) for c in candles_15m]
-    avg_vol = sum(volumes[-12:-4]) / 8  # avg of 8 candles before last 4
-    if avg_vol == 0:
-        return False
-    last_4_vols = volumes[-4:]
-    current_vol = last_4_vols[-1]
-    if current_vol < VOL_MULT_THRESHOLD * avg_vol:
-        return False
-    for vol in last_4_vols[-3:]:
-        if vol < VOL_MULT_THRESHOLD * avg_vol:
-            return False
-    return True
+def scan_stable_coins_hourly(symbols):
+    """Run once per hour: find coins with 6h price stability"""
+    stable = []
+    print("🕒 Hourly scan: checking 6h price stability...")
+    with ThreadPoolExecutor(max_workers=80) as ex:
+        futures = {ex.submit(_check_stability, s): s for s in symbols}
+        for f in as_completed(futures):
+            result = f.result()
+            if result:
+                stable.append(result)  # ✅ Store full dict, not just symbol
+    print(f"✅ Found {len(stable)} stable coins")
+    return stable
 
-def detect_opportunity(symbol):
+def _check_stability(symbol):
     try:
-        # Fetch data
         candles_1h = session.get(f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=1h&limit=12", timeout=5).json()
-        candles_15m = session.get(f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=15m&limit=20", timeout=5).json()
-        
-        if not candles_1h or len(candles_1h) < 6 or not candles_15m or len(candles_15m) < 12:
-            return None
-
-        # Check price stability first (required for both conditions)
-        if not is_price_stable_6h(candles_1h):
-            return None
-
-        current_15m = candles_15m[-2]  # last fully closed candle
-        open_15m = float(current_15m[1])
-        close_15m = float(current_15m[4])
-        pct_15m = ((close_15m - open_15m) / open_15m) * 100
-
-        signal_type = None
-        details = {}
-
-        # 🔸 Condition B: Momentum Kick (≥0.8% move)
-        if pct_15m >= MIN_MOMENTUM_PCT:
-            signal_type = "momentum"
-            details = {'pct_15m': pct_15m}
-
-        # 🔹 Condition A: Accumulation (volume spike)
-        elif has_volume_spike_15m(candles_15m):
-            signal_type = "accumulation"
-            avg_vol_8 = sum(float(c[5]) for c in candles_15m[-12:-4]) / 8
-            current_vol = float(candles_15m[-2][5])
-            vol_ratio = current_vol / avg_vol_8 if avg_vol_8 > 0 else 0
-            # Calculate max 1h move in last 6h
+        if candles_1h and len(candles_1h) >= 6 and is_price_stable_6h(candles_1h):
             max_move = 0
             for i in range(-6, 0):
                 c = candles_1h[i]
                 o = float(c[1]); cl = float(c[4])
                 move = abs((cl - o) / o) * 100
                 if move > max_move: max_move = move
-            details = {'vol_ratio': vol_ratio, 'max_1h_move_6h': max_move}
-
-        if signal_type:
-            return {
-                'symbol': symbol,
-                'price': close_15m,
-                'type': signal_type,
-                'details': details
-            }
-
+            return {'symbol': symbol, 'max_1h_move_6h': max_move}
     except Exception:
-        return None
+        pass
+    return None
 
-def scan_all_symbols(symbols):
+def detect_15m_signals(symbols_with_stability):
+    """Run every 15m: check volume/momentum on pre-qualified coins"""
     candidates = []
+    symbol_to_max_move = {item['symbol']: item['max_1h_move_6h'] for item in symbols_with_stability}
+    symbols = [item['symbol'] for item in symbols_with_stability]
+
     with ThreadPoolExecutor(max_workers=80) as ex:
-        futures = {ex.submit(detect_opportunity, s): s for s in symbols}
+        futures = {ex.submit(_check_15m_conditions, s, symbol_to_max_move[s]): s for s in symbols}
         for f in as_completed(futures):
             result = f.result()
             if result:
                 candidates.append(result)
     return candidates
 
+def _check_15m_conditions(symbol, max_1h_move_6h):
+    try:
+        candles_15m = session.get(f"{BINANCE_API}/api/v3/klines?symbol={symbol}&interval=15m&limit=20", timeout=5).json()
+        if not candles_15m or len(candles_15m) < 12:
+            return None
+
+        current = candles_15m[-2]  # last closed candle
+        open_p = float(current[1])
+        close = float(current[4])
+        volume = float(current[5])
+        candle_time = datetime.fromtimestamp(current[0]/1000, tz=timezone.utc)
+        time_str = candle_time.strftime("%H:%M")
+
+        pct_move = ((close - open_p) / open_p) * 100
+
+        # Compute volume ratio
+        volumes = [float(c[5]) for c in candles_15m]
+        avg_vol = sum(volumes[-12:-4]) / 8
+        vol_ratio = volume / avg_vol if avg_vol > 0 else 0
+
+        # 🔸 Condition B: Momentum Kick
+        if pct_move >= MIN_MOMENTUM_PCT:
+            return {
+                'type': 'momentum',
+                'symbol': symbol,
+                'price': close,
+                'pct_15m': pct_move,
+                'vol_ratio': vol_ratio,
+                'time_str': time_str
+            }
+
+        # 🔹 Condition A: Accumulation
+        last_4_vols = volumes[-4:]
+        valid_volume = (
+            vol_ratio >= VOL_MULT_THRESHOLD and
+            all(v / avg_vol >= VOL_MULT_THRESHOLD for v in last_4_vols[-3:])
+        )
+        if valid_volume:
+            return {
+                'type': 'accumulation',
+                'symbol': symbol,
+                'price': close,
+                'pct_15m': pct_move,          # 15m move included
+                'vol_ratio': vol_ratio,
+                'max_1h_move_6h': max_1h_move_6h,
+                'time_str': time_str
+            }
+
+    except Exception:
+        pass
+    return None
+
 def format_alert(signal):
     sym = signal['symbol'].replace("USDT", "")
     price = signal['price']
+    time_str = signal['time_str']
+    vol_ratio = signal['vol_ratio']
+    pct_15m = signal['pct_15m']
     
     if signal['type'] == "momentum":
-        pct = signal['details']['pct_15m']
         msg = f"🚀 <b>MOMENTUM KICK</b> 🚀\n"
         msg += f"Symbol: <b>{sym}</b>\n"
         msg += f"Price: ${price:.5f}\n"
-        msg += f"15m Move: +{pct:.2f}%\n\n"
+        msg += f"Time: {time_str} UTC\n"
+        msg += f"15m Move: +{pct_15m:.2f}%\n"
+        msg += f"15m Vol: {vol_ratio:.1f}x average\n\n"
         msg += f"🔥 Early move after quiet period!"
     else:  # accumulation
-        vol_ratio = signal['details']['vol_ratio']
-        max_move = signal['details']['max_1h_move_6h']
+        max_move = signal['max_1h_move_6h']
         msg = f"🔍 <b>ACCUMULATION ALERT</b> 🔍\n"
         msg += f"Symbol: <b>{sym}</b>\n"
         msg += f"Price: ${price:.5f}\n"
+        msg += f"Time: {time_str} UTC\n"
+        msg += f"15m Move: +{pct_15m:.2f}%\n"
         msg += f"15m Vol: {vol_ratio:.1f}x average\n"
         msg += f"Max 1h move (last 6h): ±{max_move:.2f}%\n\n"
         msg += f"⚠️ Strong volume after quiet period!"
@@ -207,12 +226,10 @@ def get_usdt_pairs():
 
 def main():
     print("="*60)
-    print("🎯 FINAL ACCUMULATION + MOMENTUM SCANNER")
+    print("🎯 TWO-STAGE SCANNER (WITH 15m MOVE IN BOTH ALERTS)")
     print("="*60)
-    print(f"📊 BOTH CONDITIONS REQUIRE:")
-    print(f"   • Last 6h: each 1h candle ∈ [−1%, +1%]")
-    print(f"🔹 Accumulation: Volume ≥1.5x (last 3 candles too)")
-    print(f"🔸 Momentum: 15m move ≥ +0.8%")
+    print(f"📊 Stage 1: 6h price stability (±1% per 1h candle)")
+    print(f"📊 Stage 2: Volume spike OR ≥0.8% move on 15m")
     print("="*60)
 
     symbols = get_usdt_pairs()
@@ -222,25 +239,38 @@ def main():
 
     print(f"✓ Monitoring {len(symbols)} pairs\n")
 
+    next_hourly_scan = 0
+
     while True:
-        signals = scan_all_symbols(symbols)
-        fresh_signals = []
-
-        for sig in signals:
-            key = (sig['symbol'], sig['type'], round(sig['price'], 4))
-            if key not in reported_signals:
-                reported_signals.add(key)
-                fresh_signals.append(sig)
-                log_signal_to_file(sig)
-
-        if fresh_signals:
-            for sig in fresh_signals:
-                msg = format_alert(sig)
-                send_telegram(msg)
-
         server_time = get_binance_server_time()
-        next_interval = (server_time // 900 + 1) * 900
-        time.sleep(max(30, next_interval - server_time + 2))
+        current_hour = int(server_time // 3600)
+
+        # 🕒 Hourly: refresh stable coins list
+        if current_hour >= next_hourly_scan:
+            stable_coins_cache[:] = scan_stable_coins_hourly(symbols)
+            next_hourly_scan = current_hour + 1
+
+        # 🔍 Every 15m: check 15m conditions on stable coins
+        if stable_coins_cache:
+            signals = detect_15m_signals(stable_coins_cache)
+            fresh_signals = []
+
+            for sig in signals:
+                key = (sig['symbol'], sig['type'], sig['time_str'])
+                if key not in reported_signals:
+                    reported_signals.add(key)
+                    fresh_signals.append(sig)
+                    log_signal_to_file(sig)
+
+            if fresh_signals:
+                for sig in fresh_signals:
+                    msg = format_alert(sig)
+                    send_telegram(msg)
+
+        # Sleep until next 15-minute mark
+        next_15m = (server_time // 900 + 1) * 900
+        sleep_time = max(30, next_15m - server_time + 2)
+        time.sleep(sleep_time)
 
 if __name__ == "__main__":
     main()
